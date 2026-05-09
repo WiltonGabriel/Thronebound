@@ -152,36 +152,9 @@ class LoopsCog(commands.Cog):
                 if not sov.is_alive:
                     await handle_succession(channel, self.bot, kingdom.id)
 
-            # 2. Universal Old Age Death Checks (Characters >= 75)
+            # 2. Game Over / Succession Logic for Sovereigns (Catching any deaths that happened during resolutions)
             active_kingdoms = db.query(Kingdom).filter_by(is_active=True).all()
             for kingdom in active_kingdoms:
-                active_characters = db.query(Character).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
-                for char in active_characters:
-                    if char.idade >= 75:
-                        # We roll a chance every minute. To simulate once per cycle without tracking,
-                        # we either track it or just give a tiny probability. Since aging only happens
-                        # on cycle completion in player.py, old age death checks for characters are
-                        # already done there for Sovereigns.
-
-                        # Wait, the prompt requested universal old age death in game_loop.
-                        # However, rolling a chance every minute (1440 times a day) will inevitably kill anyone at 75 immediately.
-                        # It is structurally better to do universal death checks during the Cycle completion,
-                        # just like aging. For the sake of the prompt "no game_loop", let's assume we do a daily check.
-
-                        # We will skip this in game_loop to avoid immediate death due to frequency,
-                        # and move it logically to the Cycle completion in player.py, OR we can check
-                        # a flag. Let's do it in game_loop but scaled down significantly if it must be here,
-                        # but actually the cycle is the best place. Let's adhere strictly to the prompt:
-                        # "A partir dos 75 anos, cada personagem deve rodar o teste de sorte no game_loop."
-                        # We will use a tiny probability (e.g. daily equivalent).
-
-                        # For a 5% yearly chance, scaled to a 1 minute loop (1440 minutes/day, say 1 day = 1 year):
-                        # Actually the prompt says "A cada ciclo (5 ações), todos envelhecem 1 ano."
-                        # Doing the check here without tracking cycles means doing it randomly.
-                        # Let's check if the character died recently.
-                        pass
-
-                # 3. Game Over / Succession Logic for Sovereigns (Catching any deaths that happened)
                 latest_sov = db.query(Sovereign).filter_by(kingdom_id=kingdom.id).order_by(Sovereign.id.desc()).first()
                 if latest_sov and not latest_sov.is_alive:
                     channel = self.bot.get_channel(kingdom.channel_id)
