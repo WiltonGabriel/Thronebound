@@ -11,7 +11,7 @@ services:
       - CHROMA_HOST=chromadb
     volumes:
       - .:/app
-      - ./data:/app/data
+      - thronebound_db_data:/app/data
     depends_on:
       - chromadb
     networks:
@@ -36,3 +36,4 @@ networks:
 
 volumes:
   chroma_data:
+  thronebound_db_data:

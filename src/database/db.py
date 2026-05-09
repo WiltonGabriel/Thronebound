@@ -58,6 +58,18 @@ class Sovereign(Base):
     kingdom = relationship("Kingdom", back_populates="sovereigns")
     heir = relationship("Character", foreign_keys=[designated_heir_id])
 
+    def age_up(self):
+        self.age += 1
+
+    def roll_natural_death(self) -> bool:
+        """Returns True if the sovereign dies of old age."""
+        if self.age >= 75:
+            death_chance = (self.age - 74) * 0.05
+            if random.random() < death_chance:
+                self.is_alive = False
+                return True
+        return False
+
 class Character(Base):
     __tablename__ = 'characters'
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -74,6 +86,24 @@ class Character(Base):
     personalidade = Column(String, nullable=False) # e.g. "Ambicioso e cruel"
 
     kingdom = relationship("Kingdom", back_populates="characters")
+
+    def age_up(self):
+        self.idade += 1
+
+    def roll_natural_death(self) -> bool:
+        """Returns True if the character dies of old age."""
+        if self.idade >= 75:
+            death_chance = (self.idade - 74) * 0.05
+            if random.random() < death_chance:
+                self.is_alive = False
+                return True
+        return False
+
+    def evaluate_loyalty_shift(self, amount: int):
+        self.lealdade = max(0, min(100, self.lealdade + amount))
+
+    def evaluate_power_shift(self, amount: int):
+        self.poder = max(0, min(100, self.poder + amount))
 
 class ActionQueue(Base):
     __tablename__ = 'action_queue'
