@@ -1,39 +1,66 @@
 import aiohttp
 import os
 import json
+import google.generativeai as genai
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://172.17.0.1:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:e4b")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:e2b")
 
-async def query_ollama(prompt: str, json_format: bool = False) -> str:
+AI_PROVIDER = os.getenv("AI_PROVIDER", "ollama").lower()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+if AI_PROVIDER == "gemini" and GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+async def query_ai(prompt: str, json_format: bool = False) -> str:
     """
-    Sends a prompt to the local Ollama API.
-    If json_format is True, it forces the model to respond in JSON.
+    Routes the prompt to the configured AI provider (Ollama or Gemini).
     """
-    url = f"{OLLAMA_BASE_URL}/api/generate"
-
-    payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False
-    }
-
-    if json_format:
-        payload["format"] = "json"
-
-    async with aiohttp.ClientSession() as session:
+    if AI_PROVIDER == "gemini":
         try:
-            async with session.post(url, json=payload, timeout=60) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data.get("response", "")
-                else:
-                    text = await response.text()
-                    print(f"Ollama API error ({response.status}): {text}")
-                    return "{}" if json_format else ""
+            # Select default fast gemini model
+            model_name = "gemini-1.5-flash"
+
+            # For JSON format, Gemini 1.5 API allows response_mime_type
+            generation_config = genai.GenerationConfig(
+                response_mime_type="application/json" if json_format else "text/plain"
+            )
+
+            model = genai.GenerativeModel(model_name, generation_config=generation_config)
+
+            response = await model.generate_content_async(prompt)
+            return response.text
         except Exception as e:
-            print(f"Failed to connect to Ollama: {e}")
+            print(f"Failed to connect to Gemini: {e}")
             return "{}" if json_format else ""
+
+    else:
+        # Default to Ollama
+        url = f"{OLLAMA_BASE_URL}/api/generate"
+
+        payload = {
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False
+        }
+
+        if json_format:
+            payload["format"] = "json"
+
+        async with aiohttp.ClientSession() as session:
+            try:
+                # Add higher timeout since local models can take longer to load into VRAM
+                async with session.post(url, json=payload, timeout=120) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get("response", "")
+                    else:
+                        text = await response.text()
+                        print(f"Ollama API error ({response.status}): {text}")
+                        return "{}" if json_format else ""
+            except Exception as e:
+                print(f"Failed to connect to Ollama: {e}")
+                return "{}" if json_format else ""
 
 async def classify_action(action_text: str) -> dict:
     """
@@ -53,7 +80,7 @@ async def classify_action(action_text: str) -> dict:
     Responda em formato JSON estrito com as chaves: "classificacao" ("Instantânea" ou "Demorada"), "gasta_acao" (boolean), "reino_destino" (string ou null), e "distancia_estimada" (número ou null).
     """
 
-    result = await query_ollama(prompt, json_format=True)
+    result = await query_ai(prompt, json_format=True)
     default_resp = {"classificacao": "Demorada", "gasta_acao": True, "reino_destino": None, "distancia_estimada": 100}
     try:
         data = json.loads(result)
@@ -86,7 +113,7 @@ async def generate_immediate_feedback(action_text: str) -> str:
 
     Escreva uma resposta muita curta e imersiva (1 a 2 frases) confirmando que a ordem foi recebida e que aguardará o desenrolar das ações.
     """
-    return await query_ollama(prompt, json_format=False)
+    return await query_ai(prompt, json_format=False)
 
 async def generate_kingdom_lore(kingdom_name: str, sovereign_name: str, gov_type: str, build_type: str, pos_x: float, pos_y: float) -> dict:
     """
@@ -117,7 +144,7 @@ async def generate_kingdom_lore(kingdom_name: str, sovereign_name: str, gov_type
     2. "personagens": (array de objetos com as propriedades citadas acima).
     """
 
-    result = await query_ollama(prompt, json_format=True)
+    result = await query_ai(prompt, json_format=True)
     try:
         data = json.loads(result)
         return data
@@ -164,7 +191,7 @@ async def answer_oracle(kingdom_status: dict, question_text: str, context_histor
 
     Dê uma resposta narrativa, imersiva e direta. (Máx 2 parágrafos).
     """
-    return await query_ollama(prompt, json_format=False)
+    return await query_ai(prompt, json_format=False)
 
 async def validate_legal_heir(family_members: list, lei_sucessao: str, lei_genero: str) -> str:
     """
@@ -198,7 +225,7 @@ async def validate_legal_heir(family_members: list, lei_sucessao: str, lei_gener
     Exemplo: {{"herdeiro_legal": "Aegon"}}
     """
 
-    result = await query_ollama(prompt, json_format=True)
+    result = await query_ai(prompt, json_format=True)
     try:
         data = json.loads(result)
         nome_legal = data.get("herdeiro_legal", "Desconhecido")
@@ -275,7 +302,7 @@ async def resolve_action(kingdom_status: dict, action_text: str, context_history
     }}
     """
 
-    result = await query_ollama(prompt, json_format=True)
+    result = await query_ai(prompt, json_format=True)
     try:
         data = json.loads(result)
         return data
