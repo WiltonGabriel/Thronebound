@@ -2,7 +2,8 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-from database.db import Kingdom, Character, ReviewQueue, Sovereign
+from database.models import Kingdom, Character, ReviewQueue, Sovereign, ActionQueue, Tile
+import datetime
 from database.vector import insert_history, query_history
 from ai.engine import resolve_action
 from utils.mechanics import handle_succession
@@ -128,40 +129,51 @@ class AdminCog(commands.Cog):
             db_updates = resolution.get("atualizacao_db", {})
             char_updates = resolution.get("atualizacao_personagens", [])
 
-            kingdom.gold = max(0, kingdom.gold + db_updates.get("ouro", 0))
-            kingdom.army = max(0, kingdom.army + db_updates.get("exercito", 0))
-            kingdom.influence = max(0, kingdom.influence + db_updates.get("influencia", 0))
-            kingdom.estabilidade = max(0, min(100, kingdom.estabilidade + db_updates.get("estabilidade", 0)))
-
-            if db_updates.get("soberano_morto", False) and sov:
-                sov.is_alive = False
-
-            for cu in char_updates:
-                char_id = cu.get("id")
-                if char_id:
-                    c = db.get(Character, char_id)
-                    if c and c.kingdom_id == kingdom.id:
-                        c.evaluate_loyalty_shift(cu.get("lealdade", 0))
-                        c.evaluate_power_shift(cu.get("poder", 0))
-                        is_alive_update = cu.get("is_alive")
-                        if is_alive_update is False:
-                            c.is_alive = False
-
-            review_item.status = "resolved"
-            db.commit()
-
             history_record = f"Soberano decretou: '{review_item.action_text}'. Mestre decidiu: '{resultado}'. Consequência final: '{narrative}'"
-            insert_history(self.bot.chroma_collection, kingdom.id, history_record)
 
-            channel = self.bot.get_channel(kingdom.channel_id)
-            if channel:
-                final_text = f"**Decreto Julgado:** {review_item.action_text}\n\n{narrative}\n\n`[Ações restantes: {review_item.acoes_restantes_agora}/5]`"
-                await channel.send(final_text)
+            # Re-run logic to determine if the original action was delayed or instant
+            from ai.engine import classify_action
+            classification_data = await classify_action(review_item.action_text)
+            classification = classification_data.get("classificacao", "Demorada")
 
-            await interaction.followup.send(f"Ação do reino {kingdom.name} resolvida com sucesso e enviada ao jogador.")
+            if classification == "Instantânea":
+                review_item.status = "resolved"
 
-            if sov and not sov.is_alive:
-                await handle_succession(channel, self.bot, kingdom.id)
+                from utils.mechanics import apply_db_updates
+                sov_died = apply_db_updates(db, kingdom.id, db_updates, char_updates)
+
+                db.commit()
+
+                insert_history(self.bot.chroma_collection, kingdom.id, history_record)
+
+                channel = self.bot.get_channel(kingdom.channel_id)
+                if channel:
+                    final_text = f"**Decreto Julgado (Mestre):** {review_item.action_text}\n\n{narrative}\n\n`[Ações restantes: {review_item.acoes_restantes_agora}/5]`"
+                    await channel.send(final_text)
+
+                await interaction.followup.send(f"Ação (Instantânea) do reino {kingdom.name} resolvida com sucesso e enviada ao jogador.")
+
+                if sov_died:
+                    await handle_succession(channel, self.bot, kingdom.id)
+            else:
+                # Delayed action
+                reino_destino = classification_data.get("reino_destino")
+                dist_estimada = classification_data.get("distancia_estimada", 100)
+
+                from utils.mechanics import enqueue_delayed_action
+                enqueue_delayed_action(db, kingdom.id, review_item.action_text, reino_destino, dist_estimada, review_item.ciclo_completo, narrative, resolution)
+
+                review_item.status = "resolved"
+                db.commit()
+
+                insert_history(self.bot.chroma_collection, kingdom.id, history_record)
+
+                channel = self.bot.get_channel(kingdom.channel_id)
+                if channel:
+                    final_text = f"**Decreto Julgado (Mestre):** {review_item.action_text}\n\n*Os emissários partiram. O resultado será revelado em breve.*"
+                    await channel.send(final_text)
+
+                await interaction.followup.send(f"Ação (Demorada) do reino {kingdom.name} julgada e inserida na fila logística com sucesso. Atributos só serão alterados quando a fila resolver.")
 
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))

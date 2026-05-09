@@ -5,7 +5,7 @@ import random
 import math
 import datetime
 
-from database.db import Kingdom, Sovereign, Character, ActionQueue, ReviewQueue
+from database.models import Kingdom, Sovereign, Character, ActionQueue, ReviewQueue, Tile
 from database.vector import insert_history, query_history
 from ai.engine import classify_action, generate_immediate_feedback, resolve_action, answer_oracle
 from utils.mechanics import handle_succession
@@ -332,7 +332,10 @@ class PlayerCog(commands.Cog):
                 if reino_destino:
                     target_k = db.query(Kingdom).filter(Kingdom.name.ilike(f"%{reino_destino}%"), Kingdom.is_active==True).first()
                     if target_k:
-                        dist_real = math.sqrt((target_k.pos_x - kingdom.pos_x)**2 + (target_k.pos_y - kingdom.pos_y)**2)
+                        k1_cap = db.query(Tile).filter_by(kingdom_id=kingdom.id).first()
+                        k2_cap = db.query(Tile).filter_by(kingdom_id=target_k.id).first()
+                        if k1_cap and k2_cap:
+                            dist_real = math.sqrt((k2_cap.x - k1_cap.x)**2 + (k2_cap.y - k1_cap.y)**2)
 
                 delay_in_hours = (dist_real / 100.0) * 24
                 resolve_time = datetime.datetime.utcnow() + datetime.timedelta(hours=delay_in_hours)
@@ -352,6 +355,16 @@ class PlayerCog(commands.Cog):
 
                 final_text = f"**Decreto Enviado:** {texto}\n\n*_{feedback}_*\n\n`[Ações restantes: {acoes_restantes_agora}/5]`"
                 await interaction.followup.send(final_text)
+
+    @app_commands.command(name="map", description="Visualize o mapa-múndi e os territórios controlados.")
+    async def map_command(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=False)
+        from engine.map_generator import render_map
+        import io
+        with self.bot.SessionLocal() as db:
+            img_bytes = render_map(db)
+            file = discord.File(io.BytesIO(img_bytes), filename="map.png")
+            await interaction.followup.send(file=file)
 
     @app_commands.command(name="p", description="Consulte o Oráculo/Conselheiros. (Não custa ações)")
     async def pergunta_oraculo(self, interaction: discord.Interaction, texto: str):

@@ -3,7 +3,7 @@ from discord.ext import tasks, commands
 import datetime
 import random
 
-from database.db import Kingdom, Sovereign, Character, ActionQueue
+from database.models import Kingdom, Sovereign, Character, ActionQueue
 from database.vector import insert_history, query_history
 from ai.engine import resolve_action
 from utils.mechanics import handle_succession
@@ -70,37 +70,80 @@ class LoopsCog(commands.Cog):
                 ciclo_completo = "[SYSTEM: Este evento completa um Ciclo]" in action.action_text
                 clean_action_text = action.action_text.replace(" [SYSTEM: Este evento completa um Ciclo]", "")
 
-                active_characters = db.query(Character).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
+                # Check if it was already resolved by the Master
+                if "[RESOLUÇÃO DO MESTRE JÁ PRONTA]:" in clean_action_text:
+                    parts = clean_action_text.split("[RESOLUÇÃO DO MESTRE JÁ PRONTA]:\n")
+                    clean_action_text = parts[0].strip()
 
-                resolution = await resolve_action(status_dict, clean_action_text, context_history=history, ciclo_completo=ciclo_completo, characters=active_characters)
-                narrative = resolution.get("narrativa", "O tempo passa, mas nada muda.")
-                db_updates = resolution.get("atualizacao_db", {})
-                char_updates = resolution.get("atualizacao_personagens", [])
+                    narrative_and_json = parts[1].split("\n[DB_UPDATES_PENDING]:\n")
+                    narrative = narrative_and_json[0].strip()
 
-                kingdom.gold = max(0, kingdom.gold + db_updates.get("ouro", 0))
-                kingdom.army = max(0, kingdom.army + db_updates.get("exercito", 0))
-                kingdom.influence = max(0, kingdom.influence + db_updates.get("influencia", 0))
-                kingdom.estabilidade = max(0, min(100, kingdom.estabilidade + db_updates.get("estabilidade", 0)))
+                    if len(narrative_and_json) > 1:
+                        import json
+                        try:
+                            resolution = json.loads(narrative_and_json[1].strip())
+                            db_updates = resolution.get("atualizacao_db", {})
+                            char_updates = resolution.get("atualizacao_personagens", [])
 
-                if db_updates.get("soberano_morto", False):
-                    sov.is_alive = False
+                            kingdom.gold = max(0, kingdom.gold + db_updates.get("ouro", 0))
+                            kingdom.army = max(0, kingdom.army + db_updates.get("exercito", 0))
+                            kingdom.influence = max(0, kingdom.influence + db_updates.get("influencia", 0))
+                            kingdom.estabilidade = max(0, min(100, kingdom.estabilidade + db_updates.get("estabilidade", 0)))
 
-                for cu in char_updates:
-                    char_id = cu.get("id")
-                    if char_id:
-                        c = db.get(Character, char_id)
-                        if c and c.kingdom_id == kingdom.id:
-                            c.lealdade = max(0, min(100, c.lealdade + cu.get("lealdade", 0)))
-                            c.poder = max(0, min(100, c.poder + cu.get("poder", 0)))
-                            is_alive_update = cu.get("is_alive")
-                            if is_alive_update is False:
-                                c.is_alive = False
+                            if db_updates.get("soberano_morto", False):
+                                sov.is_alive = False
 
-                action.status = "resolved"
-                db.commit()
+                            for cu in char_updates:
+                                char_id = cu.get("id")
+                                if char_id:
+                                    c = db.get(Character, char_id)
+                                    if c and c.kingdom_id == kingdom.id:
+                                        c.evaluate_loyalty_shift(cu.get("lealdade", 0))
+                                        c.evaluate_power_shift(cu.get("poder", 0))
+                                        is_alive_update = cu.get("is_alive")
+                                        if is_alive_update is False:
+                                            c.is_alive = False
+                        except Exception as e:
+                            print(f"Failed to parse delayed master DB updates: {e}")
 
-                history_record = f"Soberano ordenou (Ação Demorada): '{action.action_text}'. Consequência: '{narrative}'"
-                insert_history(self.bot.chroma_collection, kingdom.id, history_record)
+                    action.status = "resolved"
+                    db.commit()
+
+                    # History was already saved at /rr time, but we can log the arrival
+                    history_record = f"Soberano ordenou (Ação Demorada, Mestre interviu): '{clean_action_text}'. Os eventos agora se concretizaram."
+                    insert_history(self.bot.chroma_collection, kingdom.id, history_record)
+                else:
+                    active_characters = db.query(Character).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
+
+                    resolution = await resolve_action(status_dict, clean_action_text, context_history=history, ciclo_completo=ciclo_completo, characters=active_characters)
+                    narrative = resolution.get("narrativa", "O tempo passa, mas nada muda.")
+                    db_updates = resolution.get("atualizacao_db", {})
+                    char_updates = resolution.get("atualizacao_personagens", [])
+
+                    kingdom.gold = max(0, kingdom.gold + db_updates.get("ouro", 0))
+                    kingdom.army = max(0, kingdom.army + db_updates.get("exercito", 0))
+                    kingdom.influence = max(0, kingdom.influence + db_updates.get("influencia", 0))
+                    kingdom.estabilidade = max(0, min(100, kingdom.estabilidade + db_updates.get("estabilidade", 0)))
+
+                    if db_updates.get("soberano_morto", False):
+                        sov.is_alive = False
+
+                    for cu in char_updates:
+                        char_id = cu.get("id")
+                        if char_id:
+                            c = db.get(Character, char_id)
+                            if c and c.kingdom_id == kingdom.id:
+                                c.evaluate_loyalty_shift(cu.get("lealdade", 0))
+                                c.evaluate_power_shift(cu.get("poder", 0))
+                                is_alive_update = cu.get("is_alive")
+                                if is_alive_update is False:
+                                    c.is_alive = False
+
+                    action.status = "resolved"
+                    db.commit()
+
+                    history_record = f"Soberano ordenou (Ação Demorada): '{clean_action_text}'. Consequência: '{narrative}'"
+                    insert_history(self.bot.chroma_collection, kingdom.id, history_record)
 
                 channel = self.bot.get_channel(kingdom.channel_id)
                 if channel:

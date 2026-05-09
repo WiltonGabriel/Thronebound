@@ -33,10 +33,6 @@ class Kingdom(Base):
     lei_genero = Column(String, default="Preferência Masculina")
     cooldown_herdeiro = Column(Integer, default=0)
 
-    # Map coordinates
-    pos_x = Column(Float, nullable=False)
-    pos_y = Column(Float, nullable=False)
-
     # Discord channel
     channel_id = Column(BigInteger, nullable=True)
 
@@ -45,6 +41,7 @@ class Kingdom(Base):
     player = relationship("Player", back_populates="kingdom")
     sovereigns = relationship("Sovereign", back_populates="kingdom")
     characters = relationship("Character", back_populates="kingdom")
+    tiles = relationship("Tile", back_populates="kingdom")
 
 class Sovereign(Base):
     __tablename__ = 'sovereigns'
@@ -122,26 +119,27 @@ class ReviewQueue(Base):
     ciclo_completo = Column(Boolean, default=False)
     status = Column(String, default="pending") # pending, resolved
 
+class Tile(Base):
+    __tablename__ = 'tiles'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    x = Column(Integer, nullable=False)
+    y = Column(Integer, nullable=False)
+    biome = Column(String, nullable=False)
+    resource_index = Column(Float, default=1.0)
+    habitability = Column(Float, default=1.0)
+
+    kingdom_id = Column(Integer, ForeignKey('kingdoms.id'), nullable=True)
+    kingdom = relationship("Kingdom", back_populates="tiles")
+
+class ConfigRule(Base):
+    __tablename__ = 'config_rules'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key = Column(String, unique=True, nullable=False)
+    value = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+
 def init_db(db_path='sqlite:///data/thronebound.db'):
     engine = create_engine(db_path, connect_args={'check_same_thread': False})
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     return Session
-
-# Map Generation Logic (Outer Ring)
-def generate_kingdom_coordinates(center_x=500, center_y=500, inner_radius=200, outer_radius=500):
-    """
-    Generates a random coordinate (x, y) outside the inner_radius but inside the outer_radius.
-    This creates an 'outer ring' spawn zone, leaving the center (mountains) empty.
-    """
-    while True:
-        # Random point in a square
-        x = random.uniform(center_x - outer_radius, center_x + outer_radius)
-        y = random.uniform(center_y - outer_radius, center_y + outer_radius)
-
-        # Calculate distance to center
-        dist = math.sqrt((x - center_x)**2 + (y - center_y)**2)
-
-        # Check if it's within the ring
-        if inner_radius <= dist <= outer_radius:
-            return round(x, 2), round(y, 2)
