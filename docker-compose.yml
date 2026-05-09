@@ -9,6 +9,8 @@ services:
       - .env
     environment:
       - CHROMA_HOST=chromadb
+    ports:
+      - "8080:8080"
     volumes:
       - .:/app
       - thronebound_db_data:/app/data

@@ -12,7 +12,7 @@ app = FastAPI(title="Thronebound Dashboard")
 
 # Dependency DB
 engine = create_engine('sqlite:///data/thronebound.db', connect_args={'check_same_thread': False})
-admin = Admin(app, engine)
+admin = Admin(app, engine, base_url="/admin")
 
 # SQLAdmin Views
 class PlayerView(ModelView, model=Player):
@@ -28,7 +28,6 @@ class SovereignView(ModelView, model=Sovereign):
 class CharacterView(ModelView, model=Character):
     column_list = [Character.id, Character.nome, Character.cargo_conselho, Character.lealdade, Character.poder, Character.is_alive]
     column_searchable_list = [Character.nome]
-    list_template = "list.html"
 
 class ConfigRuleView(ModelView, model=ConfigRule):
     column_list = [ConfigRule.key, ConfigRule.value, ConfigRule.description]

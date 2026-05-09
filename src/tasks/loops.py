@@ -3,7 +3,7 @@ from discord.ext import tasks, commands
 import datetime
 import random
 
-from database.db import Kingdom, Sovereign, Character, ActionQueue
+from database.models import Kingdom, Sovereign, Character, ActionQueue
 from database.vector import insert_history, query_history
 from ai.engine import resolve_action
 from utils.mechanics import handle_succession

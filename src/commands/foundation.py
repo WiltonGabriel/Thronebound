@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-from database.db import Player, Kingdom, Sovereign, Character, generate_kingdom_coordinates
+from database.models import Player, Kingdom, Sovereign, Character, generate_kingdom_coordinates
 from database.vector import insert_history
 from ai.engine import generate_kingdom_lore
 
