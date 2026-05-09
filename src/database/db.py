@@ -113,6 +113,15 @@ class ActionQueue(Base):
     resolve_at = Column(DateTime, nullable=False)
     status = Column(String, default="pending") # pending, resolved
 
+class ReviewQueue(Base):
+    __tablename__ = 'review_queue'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kingdom_id = Column(Integer, ForeignKey('kingdoms.id'))
+    action_text = Column(Text, nullable=False)
+    acoes_restantes_agora = Column(Integer, nullable=False)
+    ciclo_completo = Column(Boolean, default=False)
+    status = Column(String, default="pending") # pending, resolved
+
 def init_db(db_path='sqlite:///data/thronebound.db'):
     engine = create_engine(db_path, connect_args={'check_same_thread': False})
     Base.metadata.create_all(engine)

@@ -5,7 +5,7 @@ import random
 import math
 import datetime
 
-from database.db import Kingdom, Sovereign, Character, ActionQueue
+from database.db import Kingdom, Sovereign, Character, ActionQueue, ReviewQueue
 from database.vector import insert_history, query_history
 from ai.engine import classify_action, generate_immediate_feedback, resolve_action, answer_oracle
 from utils.mechanics import handle_succession
@@ -252,8 +252,28 @@ class PlayerCog(commands.Cog):
 
             db.commit()
 
+            importante = classification_data.get("importante", False)
             classification = classification_data.get("classificacao", "Demorada")
             active_characters = db.query(Character).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
+
+            # Send to Admin Review if marked as "Importante"
+            if importante:
+                review_action = ReviewQueue(
+                    kingdom_id=kingdom.id,
+                    action_text=texto,
+                    acoes_restantes_agora=acoes_restantes_agora,
+                    ciclo_completo=ciclo_completo,
+                    status="pending"
+                )
+                db.add(review_action)
+                db.commit()
+
+                await interaction.followup.send(f"⚠️ **Seu decreto é de Alta Importância:** '{texto}'.\nOs deuses e mestres estão avaliando as ramificações de sua escolha. Aguarde a resolução oficial antes de celebrar.\n`[Ações restantes: {acoes_restantes_agora}/5]`")
+
+                admin_channel = discord.utils.get(interaction.guild.text_channels, name="mesa-do-mestre")
+                if admin_channel:
+                    await admin_channel.send(f"🔴 **REVISÃO PENDENTE:** O reino de {kingdom.name} enviou uma ação crítica: '{texto}'.\nUse `/rr {kingdom.id} <resultado>` para arbitrar as consequências.")
+                return
 
             if classification == "Instantânea":
                 status_dict = {
