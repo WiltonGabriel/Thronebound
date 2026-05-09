@@ -2,10 +2,9 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
-from database.models import Player, Kingdom, Sovereign, Character
+from database.db import Player, Kingdom, Sovereign, Character, generate_kingdom_coordinates
 from database.vector import insert_history
 from ai.engine import generate_kingdom_lore
-from engine.map_generator import claim_starting_tiles
 
 GOVERNMENT_TYPES = [
     "Beilhique", "Despotado", "Domínio", "Ducado", "Emirado", "Império",
@@ -74,6 +73,8 @@ class FundarNacaoModal(discord.ui.Modal, title='Fundar Nação'):
             elif build == "Diplomática":
                 influence += 30
 
+            pos_x, pos_y = generate_kingdom_coordinates()
+
             kingdom = Kingdom(
                 player_id=player_id,
                 name=self.kingdom_name.value.strip(),
@@ -81,14 +82,12 @@ class FundarNacaoModal(discord.ui.Modal, title='Fundar Nação'):
                 build_type=build,
                 gold=gold,
                 army=army,
-                influence=influence
+                influence=influence,
+                pos_x=pos_x,
+                pos_y=pos_y
             )
             db.add(kingdom)
             db.commit()
-
-            # Claim tiles and get pos for AI lore context
-            capital_tile = claim_starting_tiles(db, kingdom.id)
-            pos_x, pos_y = capital_tile.x, capital_tile.y
 
             # Create Sovereign
             sovereign = Sovereign(

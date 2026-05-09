@@ -5,7 +5,7 @@ import random
 import math
 import datetime
 
-from database.models import Kingdom, Sovereign, Character, ActionQueue, ReviewQueue, Tile
+from database.db import Kingdom, Sovereign, Character, ActionQueue
 from database.vector import insert_history, query_history
 from ai.engine import classify_action, generate_immediate_feedback, resolve_action, answer_oracle
 from utils.mechanics import handle_succession
@@ -252,28 +252,8 @@ class PlayerCog(commands.Cog):
 
             db.commit()
 
-            importante = classification_data.get("importante", False)
             classification = classification_data.get("classificacao", "Demorada")
             active_characters = db.query(Character).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
-
-            # Send to Admin Review if marked as "Importante"
-            if importante:
-                review_action = ReviewQueue(
-                    kingdom_id=kingdom.id,
-                    action_text=texto,
-                    acoes_restantes_agora=acoes_restantes_agora,
-                    ciclo_completo=ciclo_completo,
-                    status="pending"
-                )
-                db.add(review_action)
-                db.commit()
-
-                await interaction.followup.send(f"⚠️ **Seu decreto é de Alta Importância:** '{texto}'.\nOs deuses e mestres estão avaliando as ramificações de sua escolha. Aguarde a resolução oficial antes de celebrar.\n`[Ações restantes: {acoes_restantes_agora}/5]`")
-
-                admin_channel = discord.utils.get(interaction.guild.text_channels, name="mesa-do-mestre")
-                if admin_channel:
-                    await admin_channel.send(f"🔴 **REVISÃO PENDENTE:** O reino de {kingdom.name} enviou uma ação crítica: '{texto}'.\nUse `/rr {kingdom.id} <resultado>` para arbitrar as consequências.")
-                return
 
             if classification == "Instantânea":
                 status_dict = {
@@ -332,10 +312,7 @@ class PlayerCog(commands.Cog):
                 if reino_destino:
                     target_k = db.query(Kingdom).filter(Kingdom.name.ilike(f"%{reino_destino}%"), Kingdom.is_active==True).first()
                     if target_k:
-                        k1_cap = db.query(Tile).filter_by(kingdom_id=kingdom.id).first()
-                        k2_cap = db.query(Tile).filter_by(kingdom_id=target_k.id).first()
-                        if k1_cap and k2_cap:
-                            dist_real = math.sqrt((k2_cap.x - k1_cap.x)**2 + (k2_cap.y - k1_cap.y)**2)
+                        dist_real = math.sqrt((target_k.pos_x - kingdom.pos_x)**2 + (target_k.pos_y - kingdom.pos_y)**2)
 
                 delay_in_hours = (dist_real / 100.0) * 24
                 resolve_time = datetime.datetime.utcnow() + datetime.timedelta(hours=delay_in_hours)
@@ -355,16 +332,6 @@ class PlayerCog(commands.Cog):
 
                 final_text = f"**Decreto Enviado:** {texto}\n\n*_{feedback}_*\n\n`[Ações restantes: {acoes_restantes_agora}/5]`"
                 await interaction.followup.send(final_text)
-
-    @app_commands.command(name="map", description="Visualize o mapa-múndi e os territórios controlados.")
-    async def map_command(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=False)
-        from engine.map_generator import render_map
-        import io
-        with self.bot.SessionLocal() as db:
-            img_bytes = render_map(db)
-            file = discord.File(io.BytesIO(img_bytes), filename="map.png")
-            await interaction.followup.send(file=file)
 
     @app_commands.command(name="p", description="Consulte o Oráculo/Conselheiros. (Não custa ações)")
     async def pergunta_oraculo(self, interaction: discord.Interaction, texto: str):

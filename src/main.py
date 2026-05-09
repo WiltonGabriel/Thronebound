@@ -3,11 +3,8 @@ from discord.ext import commands
 import os
 from dotenv import load_dotenv
 
-from database.models import init_db
+from database.db import init_db
 from database.vector import init_chroma
-from engine.map_generator import generate_procedural_map
-import asyncio
-from web.dashboard import run_dashboard
 
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -22,11 +19,6 @@ class ThroneboundBot(commands.Bot):
         self.synced = False
 
     async def setup_hook(self):
-        # Setup Procedural World Map
-        with self.SessionLocal() as db:
-            generate_procedural_map(db, seed=42)
-            print("Procedural map loaded/verified.")
-
         # Load Cogs
         await self.load_extension("commands.foundation")
         await self.load_extension("commands.player")
@@ -45,27 +37,8 @@ async def on_ready():
     print(f'Logged in as {bot.user} (ID: {bot.user.id})')
     print('------')
 
-async def start_dashboard():
-    import uvicorn
-    from web.dashboard import app
-    config = uvicorn.Config(app, host="0.0.0.0", port=8080, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
-
-async def main():
-    if not DISCORD_TOKEN or DISCORD_TOKEN == "your_discord_token_here":
-        print("Please set DISCORD_TOKEN in .env file")
-        return
-
-    dashboard_task = asyncio.create_task(start_dashboard())
-
-    async with bot:
-        await bot.start(DISCORD_TOKEN)
-
-    await dashboard_task
-
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Shutting down...")
+    if DISCORD_TOKEN and DISCORD_TOKEN != "your_discord_token_here":
+        bot.run(DISCORD_TOKEN)
+    else:
+        print("Please set DISCORD_TOKEN in .env file")

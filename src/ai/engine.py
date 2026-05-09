@@ -40,8 +40,7 @@ async def classify_action(action_text: str) -> dict:
     Classifies if an action is 'Instantânea' (Local) or 'Demorada' (External).
     Also attempts to extract 'reino_destino' (string) and 'distancia_estimada' (number).
     Evaluates if the action is meaningful enough to spend a Decree/Action point.
-    Evaluates if the action is 'importante' (requires Master review).
-    Returns a dict with 'classificacao', 'reino_destino', 'distancia_estimada', 'gasta_acao', and 'importante'.
+    Returns a dict with 'classificacao', 'reino_destino', 'distancia_estimada', and 'gasta_acao'.
     """
     prompt = f"""
     Você é o mestre de um RPG de texto. Avalie a seguinte ação do jogador:
@@ -50,13 +49,12 @@ async def classify_action(action_text: str) -> dict:
     1. A ação é "Instantânea" (ações locais como caminhar, falar com servo) ou "Demorada" (ações externas/logísticas como mover tropas, enviar cartas)?
     2. A ação é significativa o suficiente para gastar um Decreto oficial (gasta_acao = true)? Ações puramente contemplativas como "olhar pro teto" ou "suspirar" não devem gastar ações (false).
     3. Se for "Demorada", qual o possível "reino_destino" (string ou null) e uma "distancia_estimada" (número entre 100 e 1000, ou null se Instantânea).
-    4. A ação é de ALTA IMPORTÂNCIA (importante = true)? Considere importante ações como: declarar guerra, promover reformas bruscas, assassinar grandes figuras ou traições de Estado.
 
-    Responda em formato JSON estrito com as chaves: "classificacao" ("Instantânea" ou "Demorada"), "gasta_acao" (boolean), "importante" (boolean), "reino_destino" (string ou null), e "distancia_estimada" (número ou null).
+    Responda em formato JSON estrito com as chaves: "classificacao" ("Instantânea" ou "Demorada"), "gasta_acao" (boolean), "reino_destino" (string ou null), e "distancia_estimada" (número ou null).
     """
 
     result = await query_ollama(prompt, json_format=True)
-    default_resp = {"classificacao": "Demorada", "gasta_acao": True, "importante": False, "reino_destino": None, "distancia_estimada": 100}
+    default_resp = {"classificacao": "Demorada", "gasta_acao": True, "reino_destino": None, "distancia_estimada": 100}
     try:
         data = json.loads(result)
         classification = data.get("classificacao", "Demorada")
@@ -64,7 +62,6 @@ async def classify_action(action_text: str) -> dict:
             classification = "Demorada"
 
         gasta_acao = data.get("gasta_acao", True)
-        importante = data.get("importante", False)
         reino_destino = data.get("reino_destino")
         dist_estimada = data.get("distancia_estimada")
         if not isinstance(dist_estimada, (int, float)):
@@ -73,7 +70,6 @@ async def classify_action(action_text: str) -> dict:
         return {
             "classificacao": classification,
             "gasta_acao": bool(gasta_acao),
-            "importante": bool(importante),
             "reino_destino": reino_destino,
             "distancia_estimada": dist_estimada
         }
@@ -214,13 +210,12 @@ async def validate_legal_heir(family_members: list, lei_sucessao: str, lei_gener
                 return c.nome
         return "Desconhecido"
 
-async def resolve_action(kingdom_status: dict, action_text: str, context_history: list = None, ciclo_completo: bool = False, characters: list = None, master_override: str = None) -> dict:
+async def resolve_action(kingdom_status: dict, action_text: str, context_history: list = None, ciclo_completo: bool = False, characters: list = None) -> dict:
     """
     Resolves an action, providing both the narrative and the DB update json.
     Injects context history and character/council state.
     Functions as a flexible 'Storyteller' Engine.
     If ciclo_completo is True, instructs AI to narrate the passing of a week/year.
-    If master_override is provided, forces the AI to output exactly the master's resolution.
     """
     history_str = ""
     if context_history:
@@ -239,12 +234,6 @@ async def resolve_action(kingdom_status: dict, action_text: str, context_history
     if ciclo_completo:
         ciclo_str = "\nIMPORTANTE: Esta ação completa um Ciclo. Faça a narrativa transparecer que semanas se passaram, o tempo avançou e os personagens envelheceram.\n"
 
-    override_str = ""
-    if master_override:
-        override_str = f"\n[ INTERVENÇÃO DO MESTRE DA MESA ]\nO resultado desta ação já foi decidido pelo Mestre. O SEU TRABALHO é apenas pegar o resultado abaixo e transformá-lo na resposta JSON estruturada correta, escrevendo a narrativa com base nesse resultado:\nRESULTADO OBRIGATÓRIO: '{master_override}'\nIgnore falhas de recursos, faça o que o Mestre mandou.\n"
-    else:
-        override_str = "\n[ DIRETRIZES DA ENGINE ]\n- Você tem liberdade total para causar eventos em cadeia. Se a ação for impopular, Estabilidade DEVE cair e NPCs com baixa Lealdade podem se rebelar ou assassinar o Soberano.\n- SEMPRE aplique uma margem de 'imprevisto' (B.O.) ou complicação realista, mesmo em ações bem-sucedidas. Nada é perfeito.\n- Se a ação exigir Ouro/Exército que o reino não possui, a ação falha miseravelmente.\n- Personagens poderosos têm grande influência; altere 'atualizacao_personagens' ativamente baseando-se no Perfil deles."
-
     prompt = f"""
     Você é a Engine de um RPG medieval orgânico estilo Crusader Kings e RimWorld. Você não segue apenas regras engessadas, mas sim cria *narrativas emergentes* dinâmicas.
     O Soberano realizou a seguinte ação: "{action_text}"
@@ -258,7 +247,12 @@ async def resolve_action(kingdom_status: dict, action_text: str, context_history
 
     {history_str}
     {ciclo_str}
-    {override_str}
+
+    [ DIRETRIZES DA ENGINE ]
+    - Você tem liberdade total para causar eventos em cadeia. Se a ação do jogador for impopular (ex: impostos ou leis brutais), a Estabilidade DEVE cair e NPCs com baixa Lealdade (<40) PODEM se rebelar, roubar recursos ou até assassinar o Soberano (setando soberano_morto: true).
+    - Se a ação exigir Ouro/Exército que o reino não possui, a ação falha miseravelmente, causando perda de Estabilidade ou Lealdade por incompetência.
+    - Personagens poderosos (Poder > 70) têm grande influência e suas ações importam mais. Altere as estatísticas de Poder e Lealdade na chave 'atualizacao_personagens' ativamente (ex: se o Chanceler é agradado, sua lealdade sobe +15).
+    - Você decide a causa e consequência narrativa de cada traço.
 
     Responda ESTRITAMENTE em formato JSON com três chaves:
     1. "narrativa": Um texto detalhado (máx 2 parágrafos) descrevendo o desenrolar das ações, focando na agência dos NPCs e no peso do mundo vivo.
@@ -267,7 +261,7 @@ async def resolve_action(kingdom_status: dict, action_text: str, context_history
 
     Exemplo:
     {{
-      "narrativa": "Sua ordem para marchar sobre os camponeses enfureceu a corte. As tropas venceram, mas as carroças atolaram na lama (imprevisto). O Mestre dos Espiões, aproveitando a queda de estabilidade, vazou seus planos e desertou.",
+      "narrativa": "Sua ordem para marchar sobre os camponeses enfureceu a corte. O Mestre dos Espiões, aproveitando a queda de estabilidade, vazou seus planos para os rebeldes e desertou.",
       "atualizacao_db": {{
         "ouro": -100,
         "exercito": -50,
