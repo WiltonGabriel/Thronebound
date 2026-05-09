@@ -103,10 +103,12 @@ async def generate_kingdom_lore(kingdom_name: str, sovereign_name: str, gov_type
     Foco Inicial: {build_type}
     Coordenadas no mapa: X={pos_x}, Y={pos_y} (O centro 500,500 é uma montanha impenetrável, as bordas são mais férteis ou costeiras).
 
-    Gere uma lore épica e descritiva de no máximo 2 parágrafos detalhando a capital e a geografia.
+    Gere uma lore épica e descritiva detalhando a fundação, a capital e a geografia.
+    INCLUA DE FORMA ORGÂNICA NESSE TEXTO A APRESENTAÇÃO DE QUEM É A FAMÍLIA REAL E QUEM SÃO OS CONSELHEIROS QUE ASSUMIRAM O PODER. O texto deve ser épico e imersivo (máx 3 parágrafos).
+
     Além disso, você deve criar obrigatoriamente um array "personagens" que contenha:
     - A Família Real: Pelo menos 1 Consorte e 1 ou 2 Filhos/Irmãos.
-    - O Conselho: Exatamente 5 personagens ocupando os cargos: Chanceler, Tesoureiro, Marechal, Espião e Capelão. (Pode ser que um familiar ocupe um cargo, mas tem que haver as 5 posições de conselho preenchidas no reino no total).
+    - O Conselho: Exatamente 5 personagens ocupando os cargos: Chanceler, Tesoureiro, Marechal, Espião e Capelão. (Um familiar pode ocupar um cargo, mas tem que haver as 5 posições de conselho preenchidas).
 
     Para CADA personagem, gere: "nome", "idade" (int), "relacao_familiar" ("Filho", "Irmão", "Consorte", "Nenhum"), "cargo_conselho" ("Chanceler", "Tesoureiro", "Marechal", "Espião", "Capelão", "Nenhum"), "poder" (int de 0 a 100), "lealdade" (int de 0 a 100) e "personalidade" (string, ex: "Ambicioso e cruel").
 
