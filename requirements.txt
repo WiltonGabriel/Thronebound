@@ -1,0 +1,5 @@
+discord.py==2.3.2
+chromadb==0.4.24
+aiohttp==3.9.3
+python-dotenv==1.0.1
+sqlalchemy==2.0.28

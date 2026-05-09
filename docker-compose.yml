@@ -1,0 +1,38 @@
+version: '3.8'
+
+services:
+  thronebound_bot:
+    build: .
+    container_name: thronebound_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - CHROMA_HOST=chromadb
+    volumes:
+      - .:/app
+      - ./data:/app/data
+    depends_on:
+      - chromadb
+    networks:
+      - thronebound_network
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: thronebound_chromadb
+    restart: unless-stopped
+    volumes:
+      - chroma_data:/chroma/chroma
+    ports:
+      - "8000:8000"
+    environment:
+      - IS_PERSISTENT=TRUE
+    networks:
+      - thronebound_network
+
+networks:
+  thronebound_network:
+    driver: bridge
+
+volumes:
+  chroma_data:
