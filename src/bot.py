@@ -30,6 +30,18 @@ class ThroneboundBot(commands.Bot):
             self.synced = True
             print("Command tree synced.")
         self.game_loop.start()
+        self.daily_reset.start()
+
+    @tasks.loop(time=datetime.time(hour=3, minute=0, tzinfo=datetime.timezone.utc))
+    async def daily_reset(self):
+        """
+        Resets remaining actions to 5 every midnight (Brasília time / 03:00 UTC).
+        """
+        await self.wait_until_ready()
+        with self.SessionLocal() as db:
+            db.query(Kingdom).filter_by(is_active=True).update({"acoes_restantes": 5})
+            db.commit()
+            print("Ações diárias resetadas com sucesso para todos os reinos.")
 
     @tasks.loop(minutes=1)
     async def game_loop(self):
@@ -73,10 +85,10 @@ class ThroneboundBot(commands.Bot):
                 narrative = resolution.get("narrativa", "O tempo passa, mas nada muda.")
                 db_updates = resolution.get("atualizacao_db", {})
 
-                # Apply DB Updates
-                kingdom.gold += db_updates.get("ouro", 0)
-                kingdom.army += db_updates.get("exercito", 0)
-                kingdom.influence += db_updates.get("influencia", 0)
+                # Apply DB Updates, guarding against negative values if possible
+                kingdom.gold = max(0, kingdom.gold + db_updates.get("ouro", 0))
+                kingdom.army = max(0, kingdom.army + db_updates.get("exercito", 0))
+                kingdom.influence = max(0, kingdom.influence + db_updates.get("influencia", 0))
 
                 if db_updates.get("soberano_morto", False):
                     sov.is_alive = False
@@ -94,10 +106,8 @@ class ThroneboundBot(commands.Bot):
                     # Assuming Discord has fetched the channel, we send the narrative
                     await channel.send(f"📜 **Relatório do Corvo:**\n{narrative}")
 
-            # 2. Aging and Game Over / Succession Logic
-
-            # First, check for deaths that happened during AI Resolution
-            # We fetch all active kingdoms
+            # 2. Game Over / Succession Logic
+            # We fetch all active kingdoms to check for deaths that happened during AI Resolution or Age Check
             active_kingdoms = db.query(Kingdom).filter_by(is_active=True).all()
 
             for kingdom in active_kingdoms:
@@ -107,16 +117,6 @@ class ThroneboundBot(commands.Bot):
                 if not latest_sov:
                     continue
 
-                # Handle death (either by AI or Old Age)
-                if latest_sov.is_alive:
-                    # Aging Check
-                    if latest_sov.age > 60:
-                        death_chance = (latest_sov.age - 60) * 0.05
-                        if random.random() < death_chance:
-                            latest_sov.is_alive = False
-                            db.commit()
-
-                # Re-check if dead (to catch both AI deaths and Old age deaths)
                 if not latest_sov.is_alive:
                     channel = self.get_channel(kingdom.channel_id)
 
@@ -133,7 +133,7 @@ class ThroneboundBot(commands.Bot):
                         new_sov = Sovereign(
                             kingdom_id=kingdom.id,
                             name=latest_sov.designated_heir_name,
-                            age=20
+                        age=latest_sov.designated_heir_age if latest_sov.designated_heir_age is not None else 20
                         )
                         db.add(new_sov)
                         db.commit()
@@ -158,7 +158,7 @@ class FundarNacaoModal(discord.ui.Modal, title='Fundar Nação'):
     build_type = discord.ui.TextInput(
         label='Foco Inicial',
         required=True,
-        placeholder='Militar, Mercantil ou Diplomatica'
+        placeholder='Militar, Mercantil ou Diplomática'
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -172,9 +172,9 @@ class FundarNacaoModal(discord.ui.Modal, title='Fundar Nação'):
             )
             return
 
-        if build not in ["Militar", "Mercantil", "Diplomatica"]:
+        if build not in ["Militar", "Mercantil", "Diplomática"]:
             await interaction.response.send_message(
-                "Foco inicial inválido! Escolha: Militar, Mercantil ou Diplomatica",
+                "Foco inicial inválido! Escolha: Militar, Mercantil ou Diplomática",
                 ephemeral=True
             )
             return
@@ -201,7 +201,7 @@ class FundarNacaoModal(discord.ui.Modal, title='Fundar Nação'):
                 army += 50
             elif build == "Mercantil":
                 gold += 500
-            elif build == "Diplomatica":
+            elif build == "Diplomática":
                 influence += 30
 
             pos_x, pos_y = generate_kingdom_coordinates()
@@ -313,8 +313,9 @@ async def nomear_herdeiro(interaction: discord.Interaction, nome: str):
             return
 
         sov.designated_heir_name = nome
+        sov.designated_heir_age = 15 # Start heir age at 15
         db.commit()
-        await interaction.response.send_message(f"Herdeiro designado com sucesso: **{nome}**.", ephemeral=True)
+        await interaction.response.send_message(f"Herdeiro designado com sucesso: **{nome}** (15 anos).", ephemeral=True)
 
 
 # Admin Commands
@@ -335,9 +336,13 @@ async def admin_reset_nacao(interaction: discord.Interaction, membro: discord.Me
 @bot.tree.command(name="admin_evento", description="[ADMIN] Injeta contexto global.")
 @commands.has_permissions(administrator=True)
 async def admin_evento(interaction: discord.Interaction, evento: str):
-    # In a real app this might save to a GlobalEvents table
-    # For now we will just acknowledge it and perhaps store it in Chroma later.
-    await interaction.response.send_message(f"Evento global registrado: {evento}", ephemeral=False)
+    # Inject global context into ChromaDB for all active kingdoms
+    with bot.SessionLocal() as db:
+        active_kingdoms = db.query(Kingdom).filter_by(is_active=True).all()
+        for k in active_kingdoms:
+            insert_history(bot.chroma_collection, k.id, f"EVENTO GLOBAL: {evento}")
+
+    await interaction.response.send_message(f"Evento global registrado e inserido nas memórias de todos os reinos ativos: {evento}", ephemeral=False)
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -366,9 +371,38 @@ async def on_message(message: discord.Message):
             await message.channel.send("Seu soberano está morto. Seu reino caiu. Aguarde a administração ou seu fim definitivo.", delete_after=10)
             return
 
+        # Control Actions per Day
+        if kingdom.acoes_restantes <= 0:
+            await message.reply("Você não possui mais ações (Decretos) disponíveis para hoje. Aguarde o ciclo virar à meia-noite.")
+            return
+
+        # Decrease remaining actions
+        kingdom.acoes_restantes -= 1
+        kingdom.acoes_gastas += 1
+
+        ciclo_completo = False
+        if kingdom.acoes_gastas >= 5:
+            ciclo_completo = True
+            kingdom.acoes_gastas = 0
+
+            # Age Sovereign and Heir by 1 year
+            sov.age += 1
+            if sov.designated_heir_age is not None:
+                sov.designated_heir_age += 1
+
+            # Old age death check (75+)
+            if sov.age >= 75:
+                death_chance = (sov.age - 74) * 0.05
+                if random.random() < death_chance:
+                    sov.is_alive = False
+
+        # Commit action changes before potentially long AI call
+        db.commit()
+
         # 1. Classify Action
         action_text = message.content
-        classification = await classify_action(action_text)
+        classification_data = await classify_action(action_text)
+        classification = classification_data.get("classificacao", "Demorada")
 
         if classification == "Instantânea":
             # Resolve immediately
@@ -383,14 +417,14 @@ async def on_message(message: discord.Message):
 
             # Send a typing indicator since Ollama might take a moment
             async with message.channel.typing():
-                resolution = await resolve_action(status_dict, action_text, context_history=history)
+                resolution = await resolve_action(status_dict, action_text, context_history=history, ciclo_completo=ciclo_completo)
                 narrative = resolution.get("narrativa", "O tempo passa, mas nada muda.")
                 db_updates = resolution.get("atualizacao_db", {})
 
-                # Apply DB Updates
-                kingdom.gold += db_updates.get("ouro", 0)
-                kingdom.army += db_updates.get("exercito", 0)
-                kingdom.influence += db_updates.get("influencia", 0)
+                # Apply DB Updates, guarding against negative values if possible
+                kingdom.gold = max(0, kingdom.gold + db_updates.get("ouro", 0))
+                kingdom.army = max(0, kingdom.army + db_updates.get("exercito", 0))
+                kingdom.influence = max(0, kingdom.influence + db_updates.get("influencia", 0))
 
                 if db_updates.get("soberano_morto", False):
                     sov.is_alive = False
@@ -410,10 +444,36 @@ async def on_message(message: discord.Message):
                 feedback = await generate_immediate_feedback(action_text)
                 await message.reply(feedback)
 
-            # For the base skeleton, let's set a flat delay.
-            # In a fully fledged version, we would calculate distance here.
-            # Delaying by 1 minute for testing purposes, but production would be hours.
-            resolve_time = datetime.datetime.utcnow() + datetime.timedelta(minutes=1)
+            # Logistics and Distance calculation
+            import math
+            reino_destino = classification_data.get("reino_destino")
+            dist_estimada = classification_data.get("distancia_estimada", 100)
+            dist_real = float(dist_estimada)
+
+            if reino_destino:
+                # Try to find the target kingdom in DB
+                # A simple fuzzy match or exact match. For exact:
+                target_k = db.query(Kingdom).filter(Kingdom.name.ilike(f"%{reino_destino}%"), Kingdom.is_active==True).first()
+                if target_k:
+                    # distance = sqrt((x2 - x1)^2 + (y2 - y1)^2)
+                    dist_real = math.sqrt((target_k.pos_x - kingdom.pos_x)**2 + (target_k.pos_y - kingdom.pos_y)**2)
+
+            # Every 100 units of distance equals 1 cycle of delay (1 real day / 24 hours).
+            # For demonstration purposes, we will translate 1 cycle to 1 hour real time delay so the player doesn't have to literally wait 24h for a test.
+            # Production formula: delay_in_hours = (dist_real / 100.0) * 24
+            # We'll use the production formula as requested.
+            delay_in_hours = (dist_real / 100.0) * 24
+
+            # As a safeguard to not wait days during this demo, we'll cap or keep it realistic. Let's just follow the rules exactly.
+            resolve_time = datetime.datetime.utcnow() + datetime.timedelta(hours=delay_in_hours)
+
+            # Since the action is delayed, the AI won't resolve it now.
+            # But the 'ciclo_completo' flag generated during the message handling needs to be tracked.
+            # To keep things simple, delayed actions won't re-trigger aging (they trigger when the action is queued, which was done above).
+
+            # Append a note to the action text if it completed a cycle so the background task knows.
+            if ciclo_completo:
+                action_text += " [SYSTEM: Este evento completa um Ciclo]"
 
             new_action = ActionQueue(
                 kingdom_id=kingdom.id,

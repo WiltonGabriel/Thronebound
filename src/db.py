@@ -18,10 +18,13 @@ class Kingdom(Base):
     player_id = Column(BigInteger, ForeignKey('players.discord_id')) # Removed unique=True to allow resets
     name = Column(String, unique=True, nullable=False)
     government_type = Column(String, nullable=False)
-    build_type = Column(String, nullable=False) # Militar, Mercantil, Diplomatica
+    build_type = Column(String, nullable=False) # Militar, Mercantil, Diplomática
     gold = Column(Integer, default=1000)
     army = Column(Integer, default=100)
     influence = Column(Integer, default=50)
+
+    acoes_restantes = Column(Integer, default=5)
+    acoes_gastas = Column(Integer, default=0)
 
     # Map coordinates
     pos_x = Column(Float, nullable=False)
@@ -43,6 +46,7 @@ class Sovereign(Base):
     age = Column(Integer, default=20) # 20 years old start
     is_alive = Column(Boolean, default=True)
     designated_heir_name = Column(String, nullable=True)
+    designated_heir_age = Column(Integer, nullable=True)
 
     kingdom = relationship("Kingdom", back_populates="sovereigns")
 
