@@ -35,6 +35,7 @@ services:
     image: ollama/ollama:rocm
     container_name: thronebound_ollama
     restart: unless-stopped
+    command: bash -c "ollama serve & sleep 5 && ollama pull gemma4:e2b && wait $$!"
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
