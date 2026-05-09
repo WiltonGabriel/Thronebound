@@ -8,7 +8,7 @@ import random
 from discord.ext import tasks
 
 from db import init_db, Player, Kingdom, Sovereign, ActionQueue, Character, generate_kingdom_coordinates
-from ai import classify_action, generate_immediate_feedback, resolve_action, generate_kingdom_lore, answer_oracle
+from ai import classify_action, generate_immediate_feedback, resolve_action, generate_kingdom_lore, answer_oracle, validate_legal_heir
 from vector_db import init_chroma, insert_history, query_history
 
 load_dotenv()
@@ -147,25 +147,41 @@ class ThroneboundBot(commands.Bot):
                         if channel:
                             await channel.send("💀 **Seu soberano morreu sem deixar herdeiros! O reino caiu em ruínas. Game Over.**")
                     else:
-                        # Heir takes over
-                        heir = db.query(Character).get(latest_sov.designated_heir_id)
-                        if heir:
+                        # AI Legal Validation
+                        family_members = db.query(Character).filter(
+                            Character.kingdom_id == kingdom.id,
+                            Character.is_alive == True,
+                            Character.relacao_familiar != "Nenhum"
+                        ).all()
+
+                        legal_heir_name = await validate_legal_heir(family_members, kingdom.lei_sucessao, kingdom.lei_genero)
+                        designated_heir = db.query(Character).get(latest_sov.designated_heir_id)
+
+                        if not designated_heir:
+                            kingdom.is_active = False
+                            db.commit()
                             if channel:
-                                await channel.send(f"👑 **O rei está morto! Longa vida ao rei! O herdeiro {heir.nome} assume o trono.**")
+                                await channel.send("💀 **Seu soberano morreu e seu herdeiro designado não pôde ser encontrado! O reino caiu em ruínas. Game Over.**")
+                            continue
+
+                        # Compare designated heir with legal heir
+                        if designated_heir.nome.lower() == legal_heir_name.lower():
+                            if channel:
+                                await channel.send(f"👑 **O rei está morto! A sucessão ocorreu de forma pacífica e legal. Longa vida ao rei! O herdeiro {designated_heir.nome} assume o trono.**")
 
                             new_sov = Sovereign(
                                 kingdom_id=kingdom.id,
-                                name=heir.nome,
-                                age=heir.idade
+                                name=designated_heir.nome,
+                                age=designated_heir.idade
                             )
                             db.add(new_sov)
                             db.commit()
                         else:
-                            # Edge case: heir character was deleted or died but pointer remained
+                            # Usurpation / Civil War -> Game Over
                             kingdom.is_active = False
                             db.commit()
                             if channel:
-                                await channel.send("💀 **Seu soberano morreu e seu herdeiro não pôde ser encontrado! O reino caiu em ruínas. Game Over.**")
+                                await channel.send(f"🔥 **GUERRA CIVIL!** O Soberano morreu e tentou passar o trono para {designated_heir.nome}, mas a lei exigia que o trono fosse para **{legal_heir_name}**. O reino se despedaçou em chamas e sangue pela usurpação. **Game Over.**")
 
 bot = ThroneboundBot()
 
@@ -439,6 +455,10 @@ async def nomear_herdeiro(interaction: discord.Interaction, nome_exato: str):
             await interaction.response.send_message("Seu soberano está morto, você não pode nomear herdeiros.", ephemeral=True)
             return
 
+        if kingdom.cooldown_herdeiro > 0:
+            await interaction.response.send_message(f"Você não pode nomear um novo herdeiro agora. Aguarde o cooldown de {kingdom.cooldown_herdeiro} ações (Decretos) passar.", ephemeral=True)
+            return
+
         # Find the character
         target_char = db.query(Character).filter(Character.kingdom_id == kingdom.id, Character.nome.ilike(f"%{nome_exato}%"), Character.is_alive == True).first()
 
@@ -446,9 +466,15 @@ async def nomear_herdeiro(interaction: discord.Interaction, nome_exato: str):
             await interaction.response.send_message(f"Nenhum personagem vivo com o nome '{nome_exato}' foi encontrado na sua corte/dinastia.", ephemeral=True)
             return
 
+        blood_relations = ["filho", "filha", "irmão", "irma", "irmã", "sobrinho", "sobrinha", "neto", "neta"]
+        if target_char.relacao_familiar.lower() not in blood_relations:
+            await interaction.response.send_message(f"Você não pode nomear '{target_char.nome}' como herdeiro. Apenas parentes de sangue podem herdar o trono (relação atual: {target_char.relacao_familiar}).", ephemeral=True)
+            return
+
         sov.designated_heir_id = target_char.id
+        kingdom.cooldown_herdeiro = 15 # 3 cycles
         db.commit()
-        await interaction.response.send_message(f"Herdeiro designado com sucesso: **{target_char.nome}** ({target_char.idade} anos).", ephemeral=True)
+        await interaction.response.send_message(f"Herdeiro designado com sucesso: **{target_char.nome}** ({target_char.idade} anos). Seu reino entra em um período de transição política de 15 ações onde você não poderá nomear outro herdeiro.", ephemeral=False)
 
 
 # Admin Commands
@@ -573,9 +599,17 @@ async def acao_oficial(interaction: discord.Interaction, texto: str):
             await interaction.followup.send("Seu soberano está morto. Seu reino caiu. Aguarde a administração ou seu fim definitivo.")
             return
 
+        if not sov.designated_heir_id:
+            await interaction.followup.send("A sucessão está em perigo. Você não pode governar sem antes garantir o futuro do reino. Use o comando `/nomear_herdeiro` imediatamente.")
+            return
+
         if kingdom.acoes_restantes <= 0:
             await interaction.followup.send("Você não possui mais ações (Decretos) disponíveis para hoje. Aguarde o ciclo virar à meia-noite.")
             return
+
+        # Decrement cooldown if exists
+        if kingdom.cooldown_herdeiro > 0:
+            kingdom.cooldown_herdeiro -= 1
 
         # 1. Classify Action to see if it spends a point
         classification_data = await classify_action(texto)
@@ -660,6 +694,36 @@ async def acao_oficial(interaction: discord.Interaction, texto: str):
 
             final_text = f"**Decreto:** {texto}\n\n{narrative}\n\n`[Ações restantes: {acoes_restantes_agora}/5]`"
             await interaction.followup.send(final_text)
+
+            # Handle AI immediate death succession
+            if not sov.is_alive:
+                family_members = db.query(Character).filter(
+                    Character.kingdom_id == kingdom.id,
+                    Character.is_alive == True,
+                    Character.relacao_familiar != "Nenhum"
+                ).all()
+
+                legal_heir_name = await validate_legal_heir(family_members, kingdom.lei_sucessao, kingdom.lei_genero)
+                designated_heir = db.query(Character).get(sov.designated_heir_id)
+
+                if not designated_heir:
+                    kingdom.is_active = False
+                    db.commit()
+                    await interaction.followup.send("💀 **Seu soberano morreu e seu herdeiro designado não pôde ser encontrado! O reino caiu em ruínas. Game Over.**")
+                else:
+                    if designated_heir.nome.lower() == legal_heir_name.lower():
+                        await interaction.followup.send(f"👑 **O rei está morto! A sucessão ocorreu de forma pacífica e legal. Longa vida ao rei! O herdeiro {designated_heir.nome} assume o trono.**")
+                        new_sov = Sovereign(
+                            kingdom_id=kingdom.id,
+                            name=designated_heir.nome,
+                            age=designated_heir.idade
+                        )
+                        db.add(new_sov)
+                        db.commit()
+                    else:
+                        kingdom.is_active = False
+                        db.commit()
+                        await interaction.followup.send(f"🔥 **GUERRA CIVIL!** O Soberano morreu e tentou passar o trono para {designated_heir.nome}, mas a lei exigia que o trono fosse para **{legal_heir_name}**. O reino se despedaçou em chamas e sangue pela usurpação. **Game Over.**")
 
         else:
             # Delayed action

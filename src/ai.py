@@ -164,6 +164,50 @@ async def answer_oracle(kingdom_status: dict, question_text: str, context_histor
     """
     return await query_ollama(prompt, json_format=False)
 
+async def validate_legal_heir(family_members: list, lei_sucessao: str, lei_genero: str) -> str:
+    """
+    Evaluates the current living family members against the realm's succession laws
+    and returns the name of the legally mandated heir.
+    """
+    if not family_members:
+        return "Nenhum"
+
+    fam_str = "Membros da Família Real Vivos:\n"
+    for c in family_members:
+        fam_str += f"- Nome: {c.nome} | Relação: {c.relacao_familiar} | Idade: {c.idade}\n"
+
+    prompt = f"""
+    Você é o Grande Magistrado do reino em um RPG estilo Crusader Kings. O Soberano acaba de falecer.
+    Você deve avaliar estritamente as leis vigentes e a lista da Família Real viva para determinar quem é o herdeiro legal de direito ao trono.
+
+    Leis Vigentes:
+    - Sucessão: {lei_sucessao}
+    - Gênero: {lei_genero}
+
+    {fam_str}
+
+    Regras gerais (interprete com base na string da lei):
+    - Se for preferência masculina, tente achar o filho/irmão homem mais velho aplicável.
+    - Se for filho, tem preferência sobre irmão, a menos que a lei diga o contrário (Senhorio).
+    - O Herdeiro Legal DEVE ser alguém que tenha relação de sangue (Filho, Filha, Irmão, Irmã, Sobrinho, Neto). Consortes NUNCA herdam o trono legalmente.
+    - Se ninguém se encaixar perfeitamente, escolha o parente de sangue mais próximo.
+
+    Responda ESTRITAMENTE em formato JSON com uma única chave "herdeiro_legal", cujo valor deve ser o nome EXATO do personagem escolhido.
+    Exemplo: {{"herdeiro_legal": "Aegon"}}
+    """
+
+    result = await query_ollama(prompt, json_format=True)
+    try:
+        data = json.loads(result)
+        nome_legal = data.get("herdeiro_legal", "Desconhecido")
+        return nome_legal
+    except json.JSONDecodeError:
+        # Fallback to the first blood relative if parsing fails
+        for c in family_members:
+            if c.relacao_familiar not in ["Consorte", "Nenhum"]:
+                return c.nome
+        return "Desconhecido"
+
 async def resolve_action(kingdom_status: dict, action_text: str, context_history: list = None, ciclo_completo: bool = False, characters: list = None) -> dict:
     """
     Resolves an action, providing both the narrative and the DB update json.

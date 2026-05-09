@@ -31,6 +31,7 @@ class Kingdom(Base):
     lei_autoridade = Column(String, default="Autonomia dos Vassalos")
     lei_sucessao = Column(String, default="Partição Confederada")
     lei_genero = Column(String, default="Preferência Masculina")
+    cooldown_herdeiro = Column(Integer, default=0)
 
     # Map coordinates
     pos_x = Column(Float, nullable=False)
