@@ -39,29 +39,29 @@ async def classify_action(action_text: str) -> dict:
     """
     Classifies if an action is 'Instantânea' (Local) or 'Demorada' (External).
     Also attempts to extract 'reino_destino' (string) and 'distancia_estimada' (number).
-    Returns a dict with 'classificacao', 'reino_destino', and 'distancia_estimada'.
+    Evaluates if the action is meaningful enough to spend a Decree/Action point.
+    Returns a dict with 'classificacao', 'reino_destino', 'distancia_estimada', and 'gasta_acao'.
     """
     prompt = f"""
-    Você é o mestre de um RPG de texto. Classifique a seguinte ação do jogador como "Instantânea" ou "Demorada".
-    - "Instantânea": Ações locais dentro do próprio castelo/cidade (ex: caminhar, pensar, falar com um servo).
-    - "Demorada": Ações externas e logísticas (ex: mover tropas, enviar mensageiros, construir estruturas grandes, ir para outro local).
-
-    Se for "Demorada", tente extrair o nome do reino destino na chave "reino_destino". Se não for mencionado um reino, deixe nulo (null).
-    Também forneça uma "distancia_estimada" arbitrária (um número de 100 a 1000) com base no quão longe a ação parece ir. Se for Instantânea, coloque null para ambos.
-
-    Responda em formato JSON estrito com as chaves "classificacao" (valor estrito "Instantânea" ou "Demorada"), "reino_destino" (string ou null) e "distancia_estimada" (número ou null).
-
+    Você é o mestre de um RPG de texto. Avalie a seguinte ação do jogador:
     Ação do jogador: "{action_text}"
+
+    1. A ação é "Instantânea" (ações locais como caminhar, falar com servo) ou "Demorada" (ações externas/logísticas como mover tropas, enviar cartas)?
+    2. A ação é significativa o suficiente para gastar um Decreto oficial (gasta_acao = true)? Ações puramente contemplativas como "olhar pro teto" ou "suspirar" não devem gastar ações (false).
+    3. Se for "Demorada", qual o possível "reino_destino" (string ou null) e uma "distancia_estimada" (número entre 100 e 1000, ou null se Instantânea).
+
+    Responda em formato JSON estrito com as chaves: "classificacao" ("Instantânea" ou "Demorada"), "gasta_acao" (boolean), "reino_destino" (string ou null), e "distancia_estimada" (número ou null).
     """
 
     result = await query_ollama(prompt, json_format=True)
-    default_resp = {"classificacao": "Demorada", "reino_destino": None, "distancia_estimada": 100}
+    default_resp = {"classificacao": "Demorada", "gasta_acao": True, "reino_destino": None, "distancia_estimada": 100}
     try:
         data = json.loads(result)
         classification = data.get("classificacao", "Demorada")
         if classification not in ["Instantânea", "Demorada"]:
             classification = "Demorada"
 
+        gasta_acao = data.get("gasta_acao", True)
         reino_destino = data.get("reino_destino")
         dist_estimada = data.get("distancia_estimada")
         if not isinstance(dist_estimada, (int, float)):
@@ -69,6 +69,7 @@ async def classify_action(action_text: str) -> dict:
 
         return {
             "classificacao": classification,
+            "gasta_acao": bool(gasta_acao),
             "reino_destino": reino_destino,
             "distancia_estimada": dist_estimada
         }
@@ -84,6 +85,74 @@ async def generate_immediate_feedback(action_text: str) -> str:
     O Soberano acabou de dar a seguinte ordem externa/logística: "{action_text}"
 
     Escreva uma resposta muita curta e imersiva (1 a 2 frases) confirmando que a ordem foi recebida e que aguardará o desenrolar das ações.
+    """
+    return await query_ollama(prompt, json_format=False)
+
+async def generate_kingdom_lore(kingdom_name: str, sovereign_name: str, gov_type: str, build_type: str, pos_x: float, pos_y: float) -> dict:
+    """
+    Generates the initial lore for a newly founded kingdom, including geographical details
+    based on coordinates and generates a royal family.
+    """
+    prompt = f"""
+    Crie o background inicial para um novo reino no RPG de texto "Thronebound".
+
+    Dados do Reino:
+    Nome: {kingdom_name}
+    Soberano: {sovereign_name}
+    Governo: {gov_type}
+    Foco Inicial: {build_type}
+    Coordenadas no mapa: X={pos_x}, Y={pos_y} (O centro 500,500 é uma montanha impenetrável, as bordas são mais férteis ou costeiras).
+
+    Gere uma lore épica e descritiva de no máximo 2 parágrafos detalhando a capital e a geografia.
+    Além disso, crie a Família Real do Soberano para que o jogador tenha laços (esposa/marido, e de 1 a 2 irmãos ou filhos).
+
+    Responda ESTRITAMENTE em formato JSON com as seguintes chaves:
+    1. "lore": (string) O texto de background narrativo.
+    2. "familia": (array de objetos) Contendo chaves "nome", "relacao" (ex: "Filho", "Esposa", "Irmão") e "idade" (int).
+    """
+
+    result = await query_ollama(prompt, json_format=True)
+    try:
+        data = json.loads(result)
+        return data
+    except json.JSONDecodeError:
+        return {
+            "lore": "Os registros antigos se perderam, mas a dinastia permanece forte.",
+            "familia": [{"nome": "Desconhecido", "relacao": "Consorte", "idade": 30}]
+        }
+
+async def answer_oracle(kingdom_status: dict, question_text: str, context_history: list = None, family_members: list = None) -> str:
+    """
+    Answers player questions about the world without mutating the game state.
+    """
+    history_str = ""
+    if context_history:
+        history_str = "Histórico recente:\n"
+        for doc in context_history:
+            history_str += f"- {doc}\n"
+
+    fam_str = ""
+    if family_members:
+        fam_str = "Membros da Família Real:\n"
+        for fm in family_members:
+            fam_str += f"- {fm.name} ({fm.relation}, {fm.age} anos)\n"
+
+    prompt = f"""
+    Você é o Oráculo/Conselheiro do reino em um RPG de texto. Responda à pergunta do Soberano.
+    Não tome decisões por ele, apenas informe como o mundo está baseado nos dados que você tem.
+
+    Dados do Reino:
+    Ouro: {kingdom_status.get('gold')}
+    Exército: {kingdom_status.get('army')}
+    Influência: {kingdom_status.get('influence')}
+    Ações Restantes Hoje: {kingdom_status.get('acoes_restantes')}
+
+    {fam_str}
+    {history_str}
+
+    Pergunta do Soberano: "{question_text}"
+
+    Dê uma resposta narrativa, imersiva e direta. (Máx 2 parágrafos).
     """
     return await query_ollama(prompt, json_format=False)
 

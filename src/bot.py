@@ -7,8 +7,8 @@ import datetime
 import random
 from discord.ext import tasks
 
-from db import init_db, Player, Kingdom, Sovereign, ActionQueue, generate_kingdom_coordinates
-from ai import classify_action, generate_immediate_feedback, resolve_action
+from db import init_db, Player, Kingdom, Sovereign, ActionQueue, FamilyMember, generate_kingdom_coordinates
+from ai import classify_action, generate_immediate_feedback, resolve_action, generate_kingdom_lore, answer_oracle
 from vector_db import init_chroma, insert_history, query_history
 
 load_dotenv()
@@ -243,6 +243,16 @@ class FundarNacaoModal(discord.ui.Modal, title='Fundar Nação'):
             interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
 
+        await interaction.response.defer(ephemeral=True)
+
+        # Call AI for initial Lore & Family Generation
+        lore_data = await generate_kingdom_lore(
+            kingdom_name, self.sovereign_name.value.strip(), gov_type, build_type, pos_x, pos_y
+        )
+
+        lore_text = lore_data.get("lore", "Uma nova era se inicia nestas terras...")
+        family_list = lore_data.get("familia", [])
+
         # Assuming admin role might be added later, can adjust overwrites as needed.
         channel_name = f"reino-{kingdom_name.lower().replace(' ', '-')}"
         channel = await interaction.guild.create_text_channel(
@@ -254,11 +264,41 @@ class FundarNacaoModal(discord.ui.Modal, title='Fundar Nação'):
         with bot.SessionLocal() as db:
             kingdom = db.query(Kingdom).get(kingdom_id)
             kingdom.channel_id = channel.id
+
+            # Save Family
+            for fam in family_list:
+                fm = FamilyMember(
+                    kingdom_id=kingdom.id,
+                    name=fam.get("nome", "Desconhecido"),
+                    relation=fam.get("relacao", "Parente"),
+                    age=fam.get("idade", 20)
+                )
+                db.add(fm)
             db.commit()
 
-        await interaction.response.send_message(
-            f"Nação fundada com sucesso! Seu reino está em {channel.mention}.",
-            ephemeral=True
+            # Save initial lore to ChromaDB
+            insert_history(bot.chroma_collection, kingdom.id, f"A Fundação: {lore_text}")
+
+        # Send Initial Presentation in the Kingdom Channel
+        await channel.send(f"# Crônicas de {kingdom_name}\n\n{lore_text}")
+
+        embed = discord.Embed(title=f"Status Inicial de {kingdom_name}", color=discord.Color.blue())
+        embed.add_field(name="Ouro", value=gold)
+        embed.add_field(name="Exército", value=army)
+        embed.add_field(name="Influência", value=influence)
+        await channel.send(embed=embed)
+
+        tutorial = (
+            "📜 **Guia do Soberano:**\n"
+            "- Use `/a <ação>` para enviar Decretos (ações que gastam tempo e recursos, como enviar emissários ou atacar).\n"
+            "- Você possui **5 ações por dia**. Quando você gasta 5 ações, **1 Ciclo (Semana)** se completa, e seus personagens envelhecem 1 ano.\n"
+            "- Use `/p <pergunta>` para consultar o Oráculo/Conselheiros sobre o mundo ou seu reino sem gastar ações.\n"
+            "- Use `/dinastia` para conferir sua árvore familiar e `/nomear_herdeiro` para garantir o futuro do reino."
+        )
+        await channel.send(tutorial)
+
+        await interaction.followup.send(
+            f"Nação fundada com sucesso! Seu reino está em {channel.mention}."
         )
 
 
@@ -344,51 +384,87 @@ async def admin_evento(interaction: discord.Interaction, evento: str):
 
     await interaction.response.send_message(f"Evento global registrado e inserido nas memórias de todos os reinos ativos: {evento}", ephemeral=False)
 
-@bot.event
-async def on_message(message: discord.Message):
-    # Ignore messages from the bot itself
-    if message.author.bot:
-        return
+@bot.tree.command(name="dinastia", description="Veja a sua árvore genealógica e membros da família real.")
+async def dinastia(interaction: discord.Interaction):
+    with bot.SessionLocal() as db:
+        kingdom = db.query(Kingdom).filter_by(player_id=interaction.user.id, is_active=True).first()
+        if not kingdom:
+            await interaction.response.send_message("Você não possui uma nação ativa.", ephemeral=True)
+            return
 
-    # Ignore command messages so they can be processed by command tree
-    if message.content.startswith(bot.command_prefix):
-        return
+        sov = db.query(Sovereign).filter_by(kingdom_id=kingdom.id, is_alive=True).first()
+        family_members = db.query(FamilyMember).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
+
+        embed = discord.Embed(title=f"Dinastia de {kingdom.name}", color=discord.Color.dark_red())
+
+        if sov:
+            embed.add_field(name="Soberano", value=f"👑 {sov.name} ({sov.age} anos)", inline=False)
+            if sov.designated_heir_name:
+                age_str = f" ({sov.designated_heir_age} anos)" if sov.designated_heir_age is not None else ""
+                embed.add_field(name="Herdeiro Declarado", value=f"⭐ {sov.designated_heir_name}{age_str}", inline=False)
+        else:
+            embed.add_field(name="Soberano", value="💀 Falecido (Trono Vazio)", inline=False)
+
+        if family_members:
+            fam_text = ""
+            for fm in family_members:
+                fam_text += f"- **{fm.name}** ({fm.relation}, {fm.age} anos)\n"
+            embed.add_field(name="Membros Vivos", value=fam_text, inline=False)
+        else:
+            embed.add_field(name="Membros Vivos", value="Sua linhagem está por um fio...", inline=False)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="a", description="Realize um Decreto Oficial. Custa 1 Ação.")
+async def acao_oficial(interaction: discord.Interaction, texto: str):
+    await interaction.response.defer(ephemeral=False)
 
     with bot.SessionLocal() as db:
-        # Check if the channel belongs to an active kingdom
-        kingdom = db.query(Kingdom).filter_by(channel_id=message.channel.id, is_active=True).first()
+        # Check if the channel belongs to the active kingdom
+        kingdom = db.query(Kingdom).filter_by(channel_id=interaction.channel_id, is_active=True).first()
         if not kingdom:
-            # Not a kingdom channel, ignore
+            await interaction.followup.send("Este comando só pode ser usado no canal do seu reino ativo.")
             return
 
-        # Ensure the message is from the kingdom's owner
-        if message.author.id != kingdom.player_id:
+        if interaction.user.id != kingdom.player_id:
+            await interaction.followup.send("Apenas o Soberano pode decretar ações aqui.")
             return
 
-        # Check if sovereign is alive
         sov = db.query(Sovereign).filter_by(kingdom_id=kingdom.id, is_alive=True).first()
         if not sov:
-            await message.channel.send("Seu soberano está morto. Seu reino caiu. Aguarde a administração ou seu fim definitivo.", delete_after=10)
+            await interaction.followup.send("Seu soberano está morto. Seu reino caiu. Aguarde a administração ou seu fim definitivo.")
             return
 
-        # Control Actions per Day
         if kingdom.acoes_restantes <= 0:
-            await message.reply("Você não possui mais ações (Decretos) disponíveis para hoje. Aguarde o ciclo virar à meia-noite.")
+            await interaction.followup.send("Você não possui mais ações (Decretos) disponíveis para hoje. Aguarde o ciclo virar à meia-noite.")
+            return
+
+        # 1. Classify Action to see if it spends a point
+        classification_data = await classify_action(texto)
+        gasta_acao = classification_data.get("gasta_acao", True)
+
+        if not gasta_acao:
+            await interaction.followup.send("Seus conselheiros não consideraram isso um Decreto digno de gastar os recursos do reino. Tente uma ordem mais logística ou externa.")
             return
 
         # Decrease remaining actions
         kingdom.acoes_restantes -= 1
         kingdom.acoes_gastas += 1
+        acoes_restantes_agora = kingdom.acoes_restantes
 
         ciclo_completo = False
         if kingdom.acoes_gastas >= 5:
             ciclo_completo = True
             kingdom.acoes_gastas = 0
 
-            # Age Sovereign and Heir by 1 year
+            # Age Sovereign, Heir, and Family by 1 year
             sov.age += 1
             if sov.designated_heir_age is not None:
                 sov.designated_heir_age += 1
+
+            family_members = db.query(FamilyMember).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
+            for fm in family_members:
+                fm.age += 1
 
             # Old age death check (75+)
             if sov.age >= 75:
@@ -396,93 +472,96 @@ async def on_message(message: discord.Message):
                 if random.random() < death_chance:
                     sov.is_alive = False
 
-        # Commit action changes before potentially long AI call
+        # Commit action changes before AI call
         db.commit()
 
-        # 1. Classify Action
-        action_text = message.content
-        classification_data = await classify_action(action_text)
         classification = classification_data.get("classificacao", "Demorada")
 
         if classification == "Instantânea":
-            # Resolve immediately
             status_dict = {
                 "gold": kingdom.gold,
                 "army": kingdom.army,
-                "influence": kingdom.influence
+                "influence": kingdom.influence,
+                "acoes_restantes": acoes_restantes_agora
             }
 
-            # Retrieve RAG History
-            history = query_history(bot.chroma_collection, kingdom.id, action_text)
+            history = query_history(bot.chroma_collection, kingdom.id, texto)
 
-            # Send a typing indicator since Ollama might take a moment
-            async with message.channel.typing():
-                resolution = await resolve_action(status_dict, action_text, context_history=history, ciclo_completo=ciclo_completo)
-                narrative = resolution.get("narrativa", "O tempo passa, mas nada muda.")
-                db_updates = resolution.get("atualizacao_db", {})
+            resolution = await resolve_action(status_dict, texto, context_history=history, ciclo_completo=ciclo_completo)
+            narrative = resolution.get("narrativa", "O tempo passa, mas nada muda.")
+            db_updates = resolution.get("atualizacao_db", {})
 
-                # Apply DB Updates, guarding against negative values if possible
-                kingdom.gold = max(0, kingdom.gold + db_updates.get("ouro", 0))
-                kingdom.army = max(0, kingdom.army + db_updates.get("exercito", 0))
-                kingdom.influence = max(0, kingdom.influence + db_updates.get("influencia", 0))
+            kingdom.gold = max(0, kingdom.gold + db_updates.get("ouro", 0))
+            kingdom.army = max(0, kingdom.army + db_updates.get("exercito", 0))
+            kingdom.influence = max(0, kingdom.influence + db_updates.get("influencia", 0))
 
-                if db_updates.get("soberano_morto", False):
-                    sov.is_alive = False
+            if db_updates.get("soberano_morto", False):
+                sov.is_alive = False
 
-                db.commit()
+            db.commit()
 
-                # Save to Chroma DB
-                history_record = f"Soberano diz: '{action_text}'. Consequência: '{narrative}'"
-                insert_history(bot.chroma_collection, kingdom.id, history_record)
+            history_record = f"Soberano decretou: '{texto}'. Consequência: '{narrative}'"
+            insert_history(bot.chroma_collection, kingdom.id, history_record)
 
-                await message.reply(narrative)
+            final_text = f"**Decreto:** {texto}\n\n{narrative}\n\n`[Ações restantes: {acoes_restantes_agora}/5]`"
+            await interaction.followup.send(final_text)
 
         else:
             # Delayed action
-            # Send immediate feedback
-            async with message.channel.typing():
-                feedback = await generate_immediate_feedback(action_text)
-                await message.reply(feedback)
+            feedback = await generate_immediate_feedback(texto)
 
-            # Logistics and Distance calculation
             import math
             reino_destino = classification_data.get("reino_destino")
             dist_estimada = classification_data.get("distancia_estimada", 100)
             dist_real = float(dist_estimada)
 
             if reino_destino:
-                # Try to find the target kingdom in DB
-                # A simple fuzzy match or exact match. For exact:
                 target_k = db.query(Kingdom).filter(Kingdom.name.ilike(f"%{reino_destino}%"), Kingdom.is_active==True).first()
                 if target_k:
-                    # distance = sqrt((x2 - x1)^2 + (y2 - y1)^2)
                     dist_real = math.sqrt((target_k.pos_x - kingdom.pos_x)**2 + (target_k.pos_y - kingdom.pos_y)**2)
 
-            # Every 100 units of distance equals 1 cycle of delay (1 real day / 24 hours).
-            # For demonstration purposes, we will translate 1 cycle to 1 hour real time delay so the player doesn't have to literally wait 24h for a test.
-            # Production formula: delay_in_hours = (dist_real / 100.0) * 24
-            # We'll use the production formula as requested.
             delay_in_hours = (dist_real / 100.0) * 24
-
-            # As a safeguard to not wait days during this demo, we'll cap or keep it realistic. Let's just follow the rules exactly.
             resolve_time = datetime.datetime.utcnow() + datetime.timedelta(hours=delay_in_hours)
 
-            # Since the action is delayed, the AI won't resolve it now.
-            # But the 'ciclo_completo' flag generated during the message handling needs to be tracked.
-            # To keep things simple, delayed actions won't re-trigger aging (they trigger when the action is queued, which was done above).
-
-            # Append a note to the action text if it completed a cycle so the background task knows.
+            texto_fila = texto
             if ciclo_completo:
-                action_text += " [SYSTEM: Este evento completa um Ciclo]"
+                texto_fila += " [SYSTEM: Este evento completa um Ciclo]"
 
             new_action = ActionQueue(
                 kingdom_id=kingdom.id,
-                action_text=action_text,
+                action_text=texto_fila,
                 resolve_at=resolve_time,
                 status="pending"
             )
             db.add(new_action)
             db.commit()
+
+            final_text = f"**Decreto Enviado:** {texto}\n\n*_{feedback}_*\n\n`[Ações restantes: {acoes_restantes_agora}/5]`"
+            await interaction.followup.send(final_text)
+
+@bot.tree.command(name="p", description="Consulte o Oráculo/Conselheiros. (Não custa ações)")
+async def pergunta_oraculo(interaction: discord.Interaction, texto: str):
+    await interaction.response.defer(ephemeral=False)
+
+    with bot.SessionLocal() as db:
+        kingdom = db.query(Kingdom).filter_by(channel_id=interaction.channel_id, is_active=True).first()
+        if not kingdom:
+            await interaction.followup.send("Este comando só pode ser usado no canal do seu reino ativo.")
+            return
+
+        status_dict = {
+            "gold": kingdom.gold,
+            "army": kingdom.army,
+            "influence": kingdom.influence,
+            "acoes_restantes": kingdom.acoes_restantes
+        }
+
+        history = query_history(bot.chroma_collection, kingdom.id, texto)
+        family_members = db.query(FamilyMember).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
+
+        answer = await answer_oracle(status_dict, texto, context_history=history, family_members=family_members)
+
+        await interaction.followup.send(f"**Pergunta:** {texto}\n\n**Oráculo:**\n{answer}")
 
 @bot.event
 async def on_ready():
