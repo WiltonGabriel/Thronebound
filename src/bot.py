@@ -7,7 +7,7 @@ import datetime
 import random
 from discord.ext import tasks
 
-from db import init_db, Player, Kingdom, Sovereign, ActionQueue, FamilyMember, generate_kingdom_coordinates
+from db import init_db, Player, Kingdom, Sovereign, ActionQueue, Character, generate_kingdom_coordinates
 from ai import classify_action, generate_immediate_feedback, resolve_action, generate_kingdom_lore, answer_oracle
 from vector_db import init_chroma, insert_history, query_history
 
@@ -75,23 +75,44 @@ class ThroneboundBot(commands.Bot):
                 status_dict = {
                     "gold": kingdom.gold,
                     "army": kingdom.army,
-                    "influence": kingdom.influence
+                    "influence": kingdom.influence,
+                    "estabilidade": kingdom.estabilidade,
+                    "leis": f"Autoridade: {kingdom.lei_autoridade}, Sucessão: {kingdom.lei_sucessao}, Gênero: {kingdom.lei_genero}"
                 }
 
                 # Retrieve RAG History
                 history = query_history(self.chroma_collection, kingdom.id, action.action_text)
 
-                resolution = await resolve_action(status_dict, action.action_text, context_history=history)
+                ciclo_completo = "[SYSTEM: Este evento completa um Ciclo]" in action.action_text
+                clean_action_text = action.action_text.replace(" [SYSTEM: Este evento completa um Ciclo]", "")
+
+                active_characters = db.query(Character).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
+
+                resolution = await resolve_action(status_dict, clean_action_text, context_history=history, ciclo_completo=ciclo_completo, characters=active_characters)
                 narrative = resolution.get("narrativa", "O tempo passa, mas nada muda.")
                 db_updates = resolution.get("atualizacao_db", {})
+                char_updates = resolution.get("atualizacao_personagens", [])
 
                 # Apply DB Updates, guarding against negative values if possible
                 kingdom.gold = max(0, kingdom.gold + db_updates.get("ouro", 0))
                 kingdom.army = max(0, kingdom.army + db_updates.get("exercito", 0))
                 kingdom.influence = max(0, kingdom.influence + db_updates.get("influencia", 0))
+                kingdom.estabilidade = max(0, min(100, kingdom.estabilidade + db_updates.get("estabilidade", 0)))
 
                 if db_updates.get("soberano_morto", False):
                     sov.is_alive = False
+
+                # Apply character updates
+                for cu in char_updates:
+                    char_id = cu.get("id")
+                    if char_id:
+                        c = db.query(Character).get(char_id)
+                        if c and c.kingdom_id == kingdom.id:
+                            c.lealdade = max(0, min(100, c.lealdade + cu.get("lealdade", 0)))
+                            c.poder = max(0, min(100, c.poder + cu.get("poder", 0)))
+                            is_alive_update = cu.get("is_alive")
+                            if is_alive_update is False:
+                                c.is_alive = False
 
                 action.status = "resolved"
                 db.commit()
@@ -120,23 +141,31 @@ class ThroneboundBot(commands.Bot):
                 if not latest_sov.is_alive:
                     channel = self.get_channel(kingdom.channel_id)
 
-                    if not latest_sov.designated_heir_name:
+                    if not latest_sov.designated_heir_id:
                         kingdom.is_active = False
                         db.commit()
                         if channel:
                             await channel.send("💀 **Seu soberano morreu sem deixar herdeiros! O reino caiu em ruínas. Game Over.**")
                     else:
                         # Heir takes over
-                        if channel:
-                            await channel.send(f"👑 **O rei está morto! Longa vida ao rei! O herdeiro {latest_sov.designated_heir_name} assume o trono.**")
+                        heir = db.query(Character).get(latest_sov.designated_heir_id)
+                        if heir:
+                            if channel:
+                                await channel.send(f"👑 **O rei está morto! Longa vida ao rei! O herdeiro {heir.nome} assume o trono.**")
 
-                        new_sov = Sovereign(
-                            kingdom_id=kingdom.id,
-                            name=latest_sov.designated_heir_name,
-                        age=latest_sov.designated_heir_age if latest_sov.designated_heir_age is not None else 20
-                        )
-                        db.add(new_sov)
-                        db.commit()
+                            new_sov = Sovereign(
+                                kingdom_id=kingdom.id,
+                                name=heir.nome,
+                                age=heir.idade
+                            )
+                            db.add(new_sov)
+                            db.commit()
+                        else:
+                            # Edge case: heir character was deleted or died but pointer remained
+                            kingdom.is_active = False
+                            db.commit()
+                            if channel:
+                                await channel.send("💀 **Seu soberano morreu e seu herdeiro não pôde ser encontrado! O reino caiu em ruínas. Game Over.**")
 
 bot = ThroneboundBot()
 
@@ -243,16 +272,6 @@ class FundarNacaoModal(discord.ui.Modal, title='Fundar Nação'):
             interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
 
-        await interaction.response.defer(ephemeral=True)
-
-        # Call AI for initial Lore & Family Generation
-        lore_data = await generate_kingdom_lore(
-            kingdom_name, self.sovereign_name.value.strip(), gov_type, build_type, pos_x, pos_y
-        )
-
-        lore_text = lore_data.get("lore", "Uma nova era se inicia nestas terras...")
-        family_list = lore_data.get("familia", [])
-
         # Assuming admin role might be added later, can adjust overwrites as needed.
         channel_name = f"reino-{kingdom_name.lower().replace(' ', '-')}"
         channel = await interaction.guild.create_text_channel(
@@ -264,42 +283,61 @@ class FundarNacaoModal(discord.ui.Modal, title='Fundar Nação'):
         with bot.SessionLocal() as db:
             kingdom = db.query(Kingdom).get(kingdom_id)
             kingdom.channel_id = channel.id
+            db.commit()
 
-            # Save Family
-            for fam in family_list:
-                fm = FamilyMember(
-                    kingdom_id=kingdom.id,
-                    name=fam.get("nome", "Desconhecido"),
-                    relation=fam.get("relacao", "Parente"),
-                    age=fam.get("idade", 20)
+        # Send loading message so discord doesn't timeout the interaction
+        await interaction.response.send_message(
+            f"Nação fundada com sucesso! Os deuses estão forjando seu mundo em {channel.mention}...",
+            ephemeral=True
+        )
+        loading_msg = await channel.send("⏳ Os deuses estão forjando as terras, as leis e sua corte. Aguarde...")
+
+        # Call AI for initial Lore & Family Generation
+        lore_data = await generate_kingdom_lore(
+            kingdom_name, self.sovereign_name.value.strip(), gov_type, build_type, pos_x, pos_y
+        )
+
+        lore_text = lore_data.get("lore", "Uma nova era se inicia nestas terras...")
+        personagens_list = lore_data.get("personagens", [])
+
+        with bot.SessionLocal() as db:
+            # Save Characters
+            for char_data in personagens_list:
+                c = Character(
+                    kingdom_id=kingdom_id,
+                    nome=char_data.get("nome", "Desconhecido"),
+                    idade=char_data.get("idade", 30),
+                    relacao_familiar=char_data.get("relacao_familiar", "Nenhum"),
+                    cargo_conselho=char_data.get("cargo_conselho", "Nenhum"),
+                    poder=char_data.get("poder", 50),
+                    lealdade=char_data.get("lealdade", 50),
+                    personalidade=char_data.get("personalidade", "Neutro")
                 )
-                db.add(fm)
+                db.add(c)
             db.commit()
 
             # Save initial lore to ChromaDB
             insert_history(bot.chroma_collection, kingdom.id, f"A Fundação: {lore_text}")
 
-        # Send Initial Presentation in the Kingdom Channel
-        await channel.send(f"# Crônicas de {kingdom_name}\n\n{lore_text}")
+        # Edit loading message to Initial Presentation
+        await loading_msg.edit(content=f"# Crônicas de {kingdom_name}\n\n{lore_text}")
 
         embed = discord.Embed(title=f"Status Inicial de {kingdom_name}", color=discord.Color.blue())
         embed.add_field(name="Ouro", value=gold)
         embed.add_field(name="Exército", value=army)
         embed.add_field(name="Influência", value=influence)
+        embed.add_field(name="Estabilidade", value="50/100")
         await channel.send(embed=embed)
 
         tutorial = (
             "📜 **Guia do Soberano:**\n"
-            "- Use `/a <ação>` para enviar Decretos (ações que gastam tempo e recursos, como enviar emissários ou atacar).\n"
-            "- Você possui **5 ações por dia**. Quando você gasta 5 ações, **1 Ciclo (Semana)** se completa, e seus personagens envelhecem 1 ano.\n"
-            "- Use `/p <pergunta>` para consultar o Oráculo/Conselheiros sobre o mundo ou seu reino sem gastar ações.\n"
-            "- Use `/dinastia` para conferir sua árvore familiar e `/nomear_herdeiro` para garantir o futuro do reino."
+            "- Use `/a <ação>` para enviar Decretos. Se a ação envolver o reino, os atributos (ouro, exército, estabilidade) e a lealdade da corte reagirão.\n"
+            "- Use `/conselho` e `/leis` para ver os pilares do seu poder.\n"
+            "- Você possui **5 ações por dia**. A cada 5 ações, **1 Ciclo** se fecha, o tempo passa e todos envelhecem.\n"
+            "- Use `/p <pergunta>` para consultar a corte sem gastar ações.\n"
+            "- Sobreviva às intrigas, mantenha a Estabilidade alta, e nomeie seu herdeiro antes que a morte o alcance."
         )
         await channel.send(tutorial)
-
-        await interaction.followup.send(
-            f"Nação fundada com sucesso! Seu reino está em {channel.mention}."
-        )
 
 
 @bot.tree.command(name="fundar_nacao", description="Funde sua nação para começar a jogar.")
@@ -327,19 +365,68 @@ async def status(interaction: discord.Interaction):
         embed.add_field(name="Ouro", value=kingdom.gold)
         embed.add_field(name="Exército", value=kingdom.army)
         embed.add_field(name="Influência", value=kingdom.influence)
+        embed.add_field(name="Estabilidade", value=f"{kingdom.estabilidade}/100", inline=False)
 
         if sov:
             embed.add_field(name="Soberano", value=f"{sov.name} ({sov.age} anos)", inline=False)
-            heir = sov.designated_heir_name or "Nenhum"
-            embed.add_field(name="Herdeiro", value=heir, inline=False)
+            if sov.designated_heir_id:
+                heir = db.query(Character).get(sov.designated_heir_id)
+                heir_name = heir.nome if heir else "Desconhecido"
+            else:
+                heir_name = "Nenhum"
+            embed.add_field(name="Herdeiro", value=heir_name, inline=False)
         else:
             embed.add_field(name="Soberano", value="Morto", inline=False)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-@bot.tree.command(name="nomear_herdeiro", description="Designe o seu sucessor.")
-async def nomear_herdeiro(interaction: discord.Interaction, nome: str):
+@bot.tree.command(name="conselho", description="Veja os membros do seu Pequeno Conselho.")
+async def conselho(interaction: discord.Interaction):
+    with bot.SessionLocal() as db:
+        kingdom = db.query(Kingdom).filter_by(player_id=interaction.user.id, is_active=True).first()
+        if not kingdom:
+            await interaction.response.send_message("Você não possui uma nação ativa.", ephemeral=True)
+            return
+
+        conselheiros = db.query(Character).filter(
+            Character.kingdom_id == kingdom.id,
+            Character.cargo_conselho != "Nenhum",
+            Character.is_alive == True
+        ).all()
+
+        embed = discord.Embed(title=f"O Pequeno Conselho de {kingdom.name}", color=discord.Color.purple())
+
+        if not conselheiros:
+            embed.description = "Seu conselho está vazio. Nomeie membros para garantir a estabilidade."
+        else:
+            for c in conselheiros:
+                embed.add_field(
+                    name=f"{c.cargo_conselho}: {c.nome}",
+                    value=f"Idade: {c.idade} | Lealdade: {c.lealdade} | Poder: {c.poder}\nPerfil: *{c.personalidade}*",
+                    inline=False
+                )
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="leis", description="Veja as leis atuais do seu Reino.")
+async def leis(interaction: discord.Interaction):
+    with bot.SessionLocal() as db:
+        kingdom = db.query(Kingdom).filter_by(player_id=interaction.user.id, is_active=True).first()
+        if not kingdom:
+            await interaction.response.send_message("Você não possui uma nação ativa.", ephemeral=True)
+            return
+
+        embed = discord.Embed(title=f"Leis de {kingdom.name}", color=discord.Color.green())
+        embed.add_field(name="Autoridade", value=kingdom.lei_autoridade, inline=False)
+        embed.add_field(name="Sucessão", value=kingdom.lei_sucessao, inline=False)
+        embed.add_field(name="Gênero", value=kingdom.lei_genero, inline=False)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="nomear_herdeiro", description="Designe o seu sucessor usando o NOME exato do personagem.")
+async def nomear_herdeiro(interaction: discord.Interaction, nome_exato: str):
     with bot.SessionLocal() as db:
         kingdom = db.query(Kingdom).filter_by(player_id=interaction.user.id, is_active=True).first()
 
@@ -352,10 +439,16 @@ async def nomear_herdeiro(interaction: discord.Interaction, nome: str):
             await interaction.response.send_message("Seu soberano está morto, você não pode nomear herdeiros.", ephemeral=True)
             return
 
-        sov.designated_heir_name = nome
-        sov.designated_heir_age = 15 # Start heir age at 15
+        # Find the character
+        target_char = db.query(Character).filter(Character.kingdom_id == kingdom.id, Character.nome.ilike(f"%{nome_exato}%"), Character.is_alive == True).first()
+
+        if not target_char:
+            await interaction.response.send_message(f"Nenhum personagem vivo com o nome '{nome_exato}' foi encontrado na sua corte/dinastia.", ephemeral=True)
+            return
+
+        sov.designated_heir_id = target_char.id
         db.commit()
-        await interaction.response.send_message(f"Herdeiro designado com sucesso: **{nome}** (15 anos).", ephemeral=True)
+        await interaction.response.send_message(f"Herdeiro designado com sucesso: **{target_char.nome}** ({target_char.idade} anos).", ephemeral=True)
 
 
 # Admin Commands
@@ -393,27 +486,72 @@ async def dinastia(interaction: discord.Interaction):
             return
 
         sov = db.query(Sovereign).filter_by(kingdom_id=kingdom.id, is_alive=True).first()
-        family_members = db.query(FamilyMember).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
+        family_members = db.query(Character).filter(
+            Character.kingdom_id == kingdom.id,
+            Character.is_alive == True,
+            Character.relacao_familiar != "Nenhum"
+        ).all()
 
         embed = discord.Embed(title=f"Dinastia de {kingdom.name}", color=discord.Color.dark_red())
 
         if sov:
             embed.add_field(name="Soberano", value=f"👑 {sov.name} ({sov.age} anos)", inline=False)
-            if sov.designated_heir_name:
-                age_str = f" ({sov.designated_heir_age} anos)" if sov.designated_heir_age is not None else ""
-                embed.add_field(name="Herdeiro Declarado", value=f"⭐ {sov.designated_heir_name}{age_str}", inline=False)
+            if sov.designated_heir_id:
+                heir = db.query(Character).get(sov.designated_heir_id)
+                if heir:
+                    embed.add_field(name="Herdeiro Declarado", value=f"⭐ {heir.nome} ({heir.idade} anos)", inline=False)
         else:
             embed.add_field(name="Soberano", value="💀 Falecido (Trono Vazio)", inline=False)
 
         if family_members:
             fam_text = ""
             for fm in family_members:
-                fam_text += f"- **{fm.name}** ({fm.relation}, {fm.age} anos)\n"
+                fam_text += f"- **{fm.nome}** ({fm.relacao_familiar}, {fm.idade} anos) [Poder: {fm.poder} | Lealdade: {fm.lealdade}]\n"
             embed.add_field(name="Membros Vivos", value=fam_text, inline=False)
         else:
             embed.add_field(name="Membros Vivos", value="Sua linhagem está por um fio...", inline=False)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="alterar_lei", description="Gasta 1 ação para alterar uma lei do Reino.")
+async def alterar_lei(interaction: discord.Interaction, tipo: str, nova_lei: str):
+    await interaction.response.defer(ephemeral=False)
+
+    with bot.SessionLocal() as db:
+        kingdom = db.query(Kingdom).filter_by(channel_id=interaction.channel_id, is_active=True).first()
+        if not kingdom:
+            await interaction.followup.send("Este comando só pode ser usado no canal do seu reino ativo.")
+            return
+
+        if interaction.user.id != kingdom.player_id:
+            await interaction.followup.send("Apenas o Soberano pode alterar leis.")
+            return
+
+        if kingdom.acoes_restantes <= 0:
+            await interaction.followup.send("Você não possui mais ações (Decretos) para alterar leis hoje.")
+            return
+
+        if kingdom.estabilidade < 60:
+            await interaction.followup.send("A estabilidade do reino está muito baixa para aprovar novas leis sem uma revolta. Aumente a estabilidade primeiro.")
+            return
+
+        tipo_lower = tipo.lower()
+        if "autoridade" in tipo_lower:
+            kingdom.lei_autoridade = nova_lei
+        elif "sucessão" in tipo_lower or "sucessao" in tipo_lower:
+            kingdom.lei_sucessao = nova_lei
+        elif "gênero" in tipo_lower or "genero" in tipo_lower:
+            kingdom.lei_genero = nova_lei
+        else:
+            await interaction.followup.send("Tipo de lei inválido. Use 'Autoridade', 'Sucessão' ou 'Gênero'.")
+            return
+
+        kingdom.acoes_restantes -= 1
+        kingdom.acoes_gastas += 1
+        kingdom.estabilidade -= 10 # Cost of changing laws
+        db.commit()
+
+        await interaction.followup.send(f"📜 O Soberano decretou uma nova lei de **{tipo.title()}**: *{nova_lei}*. A estabilidade caiu temporariamente devido às mudanças.\n`[Ações restantes: {kingdom.acoes_restantes}/5]`")
 
 @bot.tree.command(name="a", description="Realize um Decreto Oficial. Custa 1 Ação.")
 async def acao_oficial(interaction: discord.Interaction, texto: str):
@@ -457,14 +595,12 @@ async def acao_oficial(interaction: discord.Interaction, texto: str):
             ciclo_completo = True
             kingdom.acoes_gastas = 0
 
-            # Age Sovereign, Heir, and Family by 1 year
+            # Age Sovereign and Family/Council by 1 year
             sov.age += 1
-            if sov.designated_heir_age is not None:
-                sov.designated_heir_age += 1
 
-            family_members = db.query(FamilyMember).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
-            for fm in family_members:
-                fm.age += 1
+            all_characters = db.query(Character).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
+            for char in all_characters:
+                char.idade += 1
 
             # Old age death check (75+)
             if sov.age >= 75:
@@ -477,26 +613,45 @@ async def acao_oficial(interaction: discord.Interaction, texto: str):
 
         classification = classification_data.get("classificacao", "Demorada")
 
+        # Get characters to pass to AI
+        active_characters = db.query(Character).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
+
         if classification == "Instantânea":
             status_dict = {
                 "gold": kingdom.gold,
                 "army": kingdom.army,
                 "influence": kingdom.influence,
+                "estabilidade": kingdom.estabilidade,
+                "leis": f"Autoridade: {kingdom.lei_autoridade}, Sucessão: {kingdom.lei_sucessao}, Gênero: {kingdom.lei_genero}",
                 "acoes_restantes": acoes_restantes_agora
             }
 
             history = query_history(bot.chroma_collection, kingdom.id, texto)
 
-            resolution = await resolve_action(status_dict, texto, context_history=history, ciclo_completo=ciclo_completo)
+            resolution = await resolve_action(status_dict, texto, context_history=history, ciclo_completo=ciclo_completo, characters=active_characters)
             narrative = resolution.get("narrativa", "O tempo passa, mas nada muda.")
             db_updates = resolution.get("atualizacao_db", {})
+            char_updates = resolution.get("atualizacao_personagens", [])
 
             kingdom.gold = max(0, kingdom.gold + db_updates.get("ouro", 0))
             kingdom.army = max(0, kingdom.army + db_updates.get("exercito", 0))
             kingdom.influence = max(0, kingdom.influence + db_updates.get("influencia", 0))
+            kingdom.estabilidade = max(0, min(100, kingdom.estabilidade + db_updates.get("estabilidade", 0)))
 
             if db_updates.get("soberano_morto", False):
                 sov.is_alive = False
+
+            # Apply character updates
+            for cu in char_updates:
+                char_id = cu.get("id")
+                if char_id:
+                    c = db.query(Character).get(char_id)
+                    if c and c.kingdom_id == kingdom.id:
+                        c.lealdade = max(0, min(100, c.lealdade + cu.get("lealdade", 0)))
+                        c.poder = max(0, min(100, c.poder + cu.get("poder", 0)))
+                        is_alive_update = cu.get("is_alive")
+                        if is_alive_update is False:
+                            c.is_alive = False
 
             db.commit()
 
@@ -553,13 +708,15 @@ async def pergunta_oraculo(interaction: discord.Interaction, texto: str):
             "gold": kingdom.gold,
             "army": kingdom.army,
             "influence": kingdom.influence,
+            "estabilidade": kingdom.estabilidade,
+            "leis": f"Autoridade: {kingdom.lei_autoridade}, Sucessão: {kingdom.lei_sucessao}, Gênero: {kingdom.lei_genero}",
             "acoes_restantes": kingdom.acoes_restantes
         }
 
         history = query_history(bot.chroma_collection, kingdom.id, texto)
-        family_members = db.query(FamilyMember).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
+        active_characters = db.query(Character).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
 
-        answer = await answer_oracle(status_dict, texto, context_history=history, family_members=family_members)
+        answer = await answer_oracle(status_dict, texto, context_history=history, characters=active_characters)
 
         await interaction.followup.send(f"**Pergunta:** {texto}\n\n**Oráculo:**\n{answer}")
 

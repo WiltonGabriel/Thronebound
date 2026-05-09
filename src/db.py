@@ -26,6 +26,12 @@ class Kingdom(Base):
     acoes_restantes = Column(Integer, default=5)
     acoes_gastas = Column(Integer, default=0)
 
+    # Crusader Kings mechanics
+    estabilidade = Column(Integer, default=50) # 0 to 100
+    lei_autoridade = Column(String, default="Autonomia dos Vassalos")
+    lei_sucessao = Column(String, default="Partição Confederada")
+    lei_genero = Column(String, default="Preferência Masculina")
+
     # Map coordinates
     pos_x = Column(Float, nullable=False)
     pos_y = Column(Float, nullable=False)
@@ -37,7 +43,7 @@ class Kingdom(Base):
 
     player = relationship("Player", back_populates="kingdom")
     sovereigns = relationship("Sovereign", back_populates="kingdom")
-    family = relationship("FamilyMember", back_populates="kingdom")
+    characters = relationship("Character", back_populates="kingdom")
 
 class Sovereign(Base):
     __tablename__ = 'sovereigns'
@@ -46,21 +52,27 @@ class Sovereign(Base):
     name = Column(String, nullable=False)
     age = Column(Integer, default=20) # 20 years old start
     is_alive = Column(Boolean, default=True)
-    designated_heir_name = Column(String, nullable=True)
-    designated_heir_age = Column(Integer, nullable=True)
+    designated_heir_id = Column(Integer, ForeignKey('characters.id'), nullable=True)
 
     kingdom = relationship("Kingdom", back_populates="sovereigns")
+    heir = relationship("Character", foreign_keys=[designated_heir_id])
 
-class FamilyMember(Base):
-    __tablename__ = 'family_members'
+class Character(Base):
+    __tablename__ = 'characters'
     id = Column(Integer, primary_key=True, autoincrement=True)
     kingdom_id = Column(Integer, ForeignKey('kingdoms.id'))
-    name = Column(String, nullable=False)
-    relation = Column(String, nullable=False) # Esposa, Marido, Filho, Irmão, etc.
-    age = Column(Integer, nullable=False)
+    nome = Column(String, nullable=False)
+    idade = Column(Integer, nullable=False)
     is_alive = Column(Boolean, default=True)
 
-    kingdom = relationship("Kingdom", back_populates="family")
+    relacao_familiar = Column(String, default="Nenhum") # Filho, Irmão, Consorte, Nenhum
+    cargo_conselho = Column(String, default="Nenhum") # Chanceler, Tesoureiro, Marechal, Espião, Capelão, Nenhum
+
+    poder = Column(Integer, default=50) # 0 to 100
+    lealdade = Column(Integer, default=50) # 0 to 100
+    personalidade = Column(String, nullable=False) # e.g. "Ambicioso e cruel"
+
+    kingdom = relationship("Kingdom", back_populates="characters")
 
 class ActionQueue(Base):
     __tablename__ = 'action_queue'
