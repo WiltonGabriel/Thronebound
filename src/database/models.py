@@ -1,0 +1,145 @@
+from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Float, ForeignKey, DateTime, Boolean, Text
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
+import datetime
+import random
+import math
+
+Base = declarative_base()
+
+class Player(Base):
+    __tablename__ = 'players'
+    discord_id = Column(BigInteger, primary_key=True)
+    joined_at = Column(DateTime, default=datetime.datetime.utcnow)
+    kingdom = relationship("Kingdom", back_populates="player", uselist=False)
+
+class Kingdom(Base):
+    __tablename__ = 'kingdoms'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    player_id = Column(BigInteger, ForeignKey('players.discord_id')) # Removed unique=True to allow resets
+    name = Column(String, unique=True, nullable=False)
+    government_type = Column(String, nullable=False)
+    build_type = Column(String, nullable=False) # Militar, Mercantil, Diplomática
+    gold = Column(Integer, default=1000)
+    army = Column(Integer, default=100)
+    influence = Column(Integer, default=50)
+
+    acoes_restantes = Column(Integer, default=5)
+    acoes_gastas = Column(Integer, default=0)
+
+    # Crusader Kings mechanics
+    estabilidade = Column(Integer, default=50) # 0 to 100
+    lei_autoridade = Column(String, default="Autonomia dos Vassalos")
+    lei_sucessao = Column(String, default="Partição Confederada")
+    lei_genero = Column(String, default="Preferência Masculina")
+    cooldown_herdeiro = Column(Integer, default=0)
+
+    # Discord channel
+    channel_id = Column(BigInteger, nullable=True)
+
+    is_active = Column(Boolean, default=True)
+
+    player = relationship("Player", back_populates="kingdom")
+    sovereigns = relationship("Sovereign", back_populates="kingdom")
+    characters = relationship("Character", back_populates="kingdom")
+    tiles = relationship("Tile", back_populates="kingdom")
+
+class Sovereign(Base):
+    __tablename__ = 'sovereigns'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kingdom_id = Column(Integer, ForeignKey('kingdoms.id'))
+    name = Column(String, nullable=False)
+    age = Column(Integer, default=20) # 20 years old start
+    is_alive = Column(Boolean, default=True)
+    designated_heir_id = Column(Integer, ForeignKey('characters.id'), nullable=True)
+
+    kingdom = relationship("Kingdom", back_populates="sovereigns")
+    heir = relationship("Character", foreign_keys=[designated_heir_id])
+
+    def age_up(self):
+        self.age += 1
+
+    def roll_natural_death(self) -> bool:
+        """Returns True if the sovereign dies of old age."""
+        if self.age >= 75:
+            death_chance = (self.age - 74) * 0.05
+            if random.random() < death_chance:
+                self.is_alive = False
+                return True
+        return False
+
+class Character(Base):
+    __tablename__ = 'characters'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kingdom_id = Column(Integer, ForeignKey('kingdoms.id'))
+    nome = Column(String, nullable=False)
+    idade = Column(Integer, nullable=False)
+    is_alive = Column(Boolean, default=True)
+
+    relacao_familiar = Column(String, default="Nenhum") # Filho, Irmão, Consorte, Nenhum
+    cargo_conselho = Column(String, default="Nenhum") # Chanceler, Tesoureiro, Marechal, Espião, Capelão, Nenhum
+
+    poder = Column(Integer, default=50) # 0 to 100
+    lealdade = Column(Integer, default=50) # 0 to 100
+    personalidade = Column(String, nullable=False) # e.g. "Ambicioso e cruel"
+
+    kingdom = relationship("Kingdom", back_populates="characters")
+
+    def age_up(self):
+        self.idade += 1
+
+    def roll_natural_death(self) -> bool:
+        """Returns True if the character dies of old age."""
+        if self.idade >= 75:
+            death_chance = (self.idade - 74) * 0.05
+            if random.random() < death_chance:
+                self.is_alive = False
+                return True
+        return False
+
+    def evaluate_loyalty_shift(self, amount: int):
+        self.lealdade = max(0, min(100, self.lealdade + amount))
+
+    def evaluate_power_shift(self, amount: int):
+        self.poder = max(0, min(100, self.poder + amount))
+
+class ActionQueue(Base):
+    __tablename__ = 'action_queue'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kingdom_id = Column(Integer, ForeignKey('kingdoms.id'))
+    action_text = Column(Text, nullable=False)
+    resolve_at = Column(DateTime, nullable=False)
+    status = Column(String, default="pending") # pending, resolved
+
+class ReviewQueue(Base):
+    __tablename__ = 'review_queue'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kingdom_id = Column(Integer, ForeignKey('kingdoms.id'))
+    action_text = Column(Text, nullable=False)
+    acoes_restantes_agora = Column(Integer, nullable=False)
+    ciclo_completo = Column(Boolean, default=False)
+    status = Column(String, default="pending") # pending, resolved
+
+class Tile(Base):
+    __tablename__ = 'tiles'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    x = Column(Integer, nullable=False)
+    y = Column(Integer, nullable=False)
+    biome = Column(String, nullable=False)
+    resource_index = Column(Float, default=1.0)
+    habitability = Column(Float, default=1.0)
+
+    kingdom_id = Column(Integer, ForeignKey('kingdoms.id'), nullable=True)
+    kingdom = relationship("Kingdom", back_populates="tiles")
+
+class ConfigRule(Base):
+    __tablename__ = 'config_rules'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    key = Column(String, unique=True, nullable=False)
+    value = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+
+def init_db(db_path='sqlite:///data/thronebound.db'):
+    engine = create_engine(db_path, connect_args={'check_same_thread': False})
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    return Session
