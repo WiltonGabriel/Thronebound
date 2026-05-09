@@ -91,10 +91,10 @@ async def generate_immediate_feedback(action_text: str) -> str:
 async def generate_kingdom_lore(kingdom_name: str, sovereign_name: str, gov_type: str, build_type: str, pos_x: float, pos_y: float) -> dict:
     """
     Generates the initial lore for a newly founded kingdom, including geographical details
-    based on coordinates and generates a royal family.
+    based on coordinates and generates a royal family AND the 5 council members.
     """
     prompt = f"""
-    Crie o background inicial para um novo reino no RPG de texto "Thronebound".
+    Crie o background inicial para um novo reino no RPG de texto "Thronebound" (estilo Crusader Kings).
 
     Dados do Reino:
     Nome: {kingdom_name}
@@ -104,11 +104,15 @@ async def generate_kingdom_lore(kingdom_name: str, sovereign_name: str, gov_type
     Coordenadas no mapa: X={pos_x}, Y={pos_y} (O centro 500,500 é uma montanha impenetrável, as bordas são mais férteis ou costeiras).
 
     Gere uma lore épica e descritiva de no máximo 2 parágrafos detalhando a capital e a geografia.
-    Além disso, crie a Família Real do Soberano para que o jogador tenha laços (esposa/marido, e de 1 a 2 irmãos ou filhos).
+    Além disso, você deve criar obrigatoriamente um array "personagens" que contenha:
+    - A Família Real: Pelo menos 1 Consorte e 1 ou 2 Filhos/Irmãos.
+    - O Conselho: Exatamente 5 personagens ocupando os cargos: Chanceler, Tesoureiro, Marechal, Espião e Capelão. (Pode ser que um familiar ocupe um cargo, mas tem que haver as 5 posições de conselho preenchidas no reino no total).
+
+    Para CADA personagem, gere: "nome", "idade" (int), "relacao_familiar" ("Filho", "Irmão", "Consorte", "Nenhum"), "cargo_conselho" ("Chanceler", "Tesoureiro", "Marechal", "Espião", "Capelão", "Nenhum"), "poder" (int de 0 a 100), "lealdade" (int de 0 a 100) e "personalidade" (string, ex: "Ambicioso e cruel").
 
     Responda ESTRITAMENTE em formato JSON com as seguintes chaves:
     1. "lore": (string) O texto de background narrativo.
-    2. "familia": (array de objetos) Contendo chaves "nome", "relacao" (ex: "Filho", "Esposa", "Irmão") e "idade" (int).
+    2. "personagens": (array de objetos com as propriedades citadas acima).
     """
 
     result = await query_ollama(prompt, json_format=True)
@@ -117,11 +121,14 @@ async def generate_kingdom_lore(kingdom_name: str, sovereign_name: str, gov_type
         return data
     except json.JSONDecodeError:
         return {
-            "lore": "Os registros antigos se perderam, mas a dinastia permanece forte.",
-            "familia": [{"nome": "Desconhecido", "relacao": "Consorte", "idade": 30}]
+            "lore": "Os registros antigos se perderam, mas a corte foi estabelecida.",
+            "personagens": [
+                {"nome": "Desconhecido", "idade": 30, "relacao_familiar": "Consorte", "cargo_conselho": "Nenhum", "poder": 50, "lealdade": 50, "personalidade": "Silencioso"},
+                {"nome": "Sábio", "idade": 50, "relacao_familiar": "Nenhum", "cargo_conselho": "Chanceler", "poder": 50, "lealdade": 80, "personalidade": "Leal"}
+            ]
         }
 
-async def answer_oracle(kingdom_status: dict, question_text: str, context_history: list = None, family_members: list = None) -> str:
+async def answer_oracle(kingdom_status: dict, question_text: str, context_history: list = None, characters: list = None) -> str:
     """
     Answers player questions about the world without mutating the game state.
     """
@@ -131,23 +138,24 @@ async def answer_oracle(kingdom_status: dict, question_text: str, context_histor
         for doc in context_history:
             history_str += f"- {doc}\n"
 
-    fam_str = ""
-    if family_members:
-        fam_str = "Membros da Família Real:\n"
-        for fm in family_members:
-            fam_str += f"- {fm.name} ({fm.relation}, {fm.age} anos)\n"
+    char_str = ""
+    if characters:
+        char_str = "Corte (Família e Conselho):\n"
+        for c in characters:
+            cargo = c.cargo_conselho if c.cargo_conselho != "Nenhum" else c.relacao_familiar
+            char_str += f"- {c.nome} ({cargo}, {c.idade} anos, Poder: {c.poder}, Lealdade: {c.lealdade}, Perfil: {c.personalidade})\n"
 
     prompt = f"""
-    Você é o Oráculo/Conselheiro do reino em um RPG de texto. Responda à pergunta do Soberano.
-    Não tome decisões por ele, apenas informe como o mundo está baseado nos dados que você tem.
+    Você é o Oráculo/Conselheiro do reino em um RPG de texto (estilo Crusader Kings). Responda à pergunta do Soberano.
+    Não tome decisões por ele, apenas informe como o mundo está baseado nos dados e na situação da corte.
 
     Dados do Reino:
-    Ouro: {kingdom_status.get('gold')}
-    Exército: {kingdom_status.get('army')}
-    Influência: {kingdom_status.get('influence')}
+    Ouro: {kingdom_status.get('gold')} | Exército: {kingdom_status.get('army')} | Influência: {kingdom_status.get('influence')}
+    Estabilidade: {kingdom_status.get('estabilidade')}/100
+    Leis: {kingdom_status.get('leis')}
     Ações Restantes Hoje: {kingdom_status.get('acoes_restantes')}
 
-    {fam_str}
+    {char_str}
     {history_str}
 
     Pergunta do Soberano: "{question_text}"
@@ -156,10 +164,54 @@ async def answer_oracle(kingdom_status: dict, question_text: str, context_histor
     """
     return await query_ollama(prompt, json_format=False)
 
-async def resolve_action(kingdom_status: dict, action_text: str, context_history: list = None, ciclo_completo: bool = False) -> dict:
+async def validate_legal_heir(family_members: list, lei_sucessao: str, lei_genero: str) -> str:
+    """
+    Evaluates the current living family members against the realm's succession laws
+    and returns the name of the legally mandated heir.
+    """
+    if not family_members:
+        return "Nenhum"
+
+    fam_str = "Membros da Família Real Vivos:\n"
+    for c in family_members:
+        fam_str += f"- Nome: {c.nome} | Relação: {c.relacao_familiar} | Idade: {c.idade}\n"
+
+    prompt = f"""
+    Você é o Grande Magistrado do reino em um RPG estilo Crusader Kings. O Soberano acaba de falecer.
+    Você deve avaliar estritamente as leis vigentes e a lista da Família Real viva para determinar quem é o herdeiro legal de direito ao trono.
+
+    Leis Vigentes:
+    - Sucessão: {lei_sucessao}
+    - Gênero: {lei_genero}
+
+    {fam_str}
+
+    Regras gerais (interprete com base na string da lei):
+    - Se for preferência masculina, tente achar o filho/irmão homem mais velho aplicável.
+    - Se for filho, tem preferência sobre irmão, a menos que a lei diga o contrário (Senhorio).
+    - O Herdeiro Legal DEVE ser alguém que tenha relação de sangue (Filho, Filha, Irmão, Irmã, Sobrinho, Neto). Consortes NUNCA herdam o trono legalmente.
+    - Se ninguém se encaixar perfeitamente, escolha o parente de sangue mais próximo.
+
+    Responda ESTRITAMENTE em formato JSON com uma única chave "herdeiro_legal", cujo valor deve ser o nome EXATO do personagem escolhido.
+    Exemplo: {{"herdeiro_legal": "Aegon"}}
+    """
+
+    result = await query_ollama(prompt, json_format=True)
+    try:
+        data = json.loads(result)
+        nome_legal = data.get("herdeiro_legal", "Desconhecido")
+        return nome_legal
+    except json.JSONDecodeError:
+        # Fallback to the first blood relative if parsing fails
+        for c in family_members:
+            if c.relacao_familiar not in ["Consorte", "Nenhum"]:
+                return c.nome
+        return "Desconhecido"
+
+async def resolve_action(kingdom_status: dict, action_text: str, context_history: list = None, ciclo_completo: bool = False, characters: list = None) -> dict:
     """
     Resolves an action, providing both the narrative and the DB update json.
-    Injects context history if available.
+    Injects context history and character/council state.
     If ciclo_completo is True, instructs AI to narrate the passing of a week/year.
     """
     history_str = ""
@@ -168,38 +220,52 @@ async def resolve_action(kingdom_status: dict, action_text: str, context_history
         for doc in context_history:
             history_str += f"- {doc}\n"
 
+    char_str = ""
+    if characters:
+        char_str = "Corte Atual:\n"
+        for c in characters:
+            cargo = c.cargo_conselho if c.cargo_conselho != "Nenhum" else c.relacao_familiar
+            char_str += f"- {c.nome} (ID:{c.id}, {cargo}, Poder: {c.poder}, Lealdade: {c.lealdade}, Perfil: {c.personalidade})\n"
+
     ciclo_str = ""
     if ciclo_completo:
         ciclo_str = "\nIMPORTANTE: Esta ação completa um Ciclo. Faça a narrativa transparecer que semanas se passaram, o tempo avançou e os personagens envelheceram.\n"
 
     prompt = f"""
-    Você é o mestre de um RPG medieval slow-burn. O Soberano do reino realizou a seguinte ação:
+    Você é o mestre de um RPG medieval slow-burn estilo Crusader Kings. O Soberano realizou a seguinte ação:
     Ação: "{action_text}"
 
     {history_str}
     {ciclo_str}
 
     Status atual do reino:
-    - Ouro: {kingdom_status.get('gold')}
-    - Exército: {kingdom_status.get('army')}
-    - Influência: {kingdom_status.get('influence')}
+    Ouro: {kingdom_status.get('gold')} | Exército: {kingdom_status.get('army')} | Influência: {kingdom_status.get('influence')}
+    Estabilidade: {kingdom_status.get('estabilidade')}/100
+    Leis Atuais: {kingdom_status.get('leis')}
 
-    Avalie a consequência da ação. Se a ação envolver gastar recursos que o reino não possui, a ação falha e a narrativa deve refletir isso (sem gastar recursos).
-    O Soberano também pode acabar morrendo dependendo de suas escolhas.
+    {char_str}
 
-    Responda ESTRITAMENTE em formato JSON com duas chaves:
-    1. "narrativa": Um texto descrevendo o resultado e as consequências da ação.
-    2. "atualizacao_db": Um objeto JSON contendo as mudanças relativas nos recursos. As chaves válidas são "ouro", "exercito", "influencia" e "soberano_morto" (boolean). Se não houver mudança, coloque 0.
+    Avalie a consequência da ação. Considere intrigas: conselheiros desleais podem sabotar o reino ou assassinar o rei. Leis rígidas baixam a estabilidade.
+    Se a ação envolver gastar recursos inexistentes, ela falha (não deduza os recursos, mas o rei pode passar vergonha diminuindo estabilidade/influência).
+
+    Responda ESTRITAMENTE em formato JSON com três chaves:
+    1. "narrativa": Um texto descrevendo o resultado e as consequências.
+    2. "atualizacao_db": Objeto JSON com as mudanças relativas (ex: +50, -10) nos recursos: "ouro", "exercito", "influencia", "estabilidade". Também inclua "soberano_morto" (boolean, default false).
+    3. "atualizacao_personagens": Array opcional contendo atualizações relativas (ex: +10, -20) para os personagens que reagiram à ação. Chaves do objeto: "id" (int do personagem), "lealdade", "poder", "is_alive" (boolean).
 
     Exemplo de resposta:
     {{
-      "narrativa": "Seus emissários chegaram ao reino vizinho e a oferta foi aceita. O ouro foi entregue e a influência cresceu. Os dias viram semanas, e o peso da idade se torna cada vez mais evidente no seu rosto...",
+      "narrativa": "Você ordenou um novo imposto. O ouro fluiu, mas a estabilidade caiu. O Mestre dos Espiões, achando a lei injusta, perdeu lealdade.",
       "atualizacao_db": {{
-        "ouro": -500,
+        "ouro": 500,
         "exercito": 0,
-        "influencia": 20,
+        "influencia": 0,
+        "estabilidade": -10,
         "soberano_morto": false
-      }}
+      }},
+      "atualizacao_personagens": [
+        {{ "id": 3, "lealdade": -15, "poder": 0, "is_alive": true }}
+      ]
     }}
     """
 
