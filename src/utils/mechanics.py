@@ -80,32 +80,25 @@ async def roll_universal_aging_and_death(db, kingdom_id: int, channel):
     # 1. Age the Sovereign separately since they are in their own table
     sov = db.query(Sovereign).filter_by(kingdom_id=kingdom.id, is_alive=True).first()
     if sov:
-        sov.age += 1
-        if sov.age >= 75:
-            death_chance = (sov.age - 74) * 0.05
-            if random.random() < death_chance:
-                sov.is_alive = False
+        sov.age_up()
+        sov.roll_natural_death()
 
     # 2. Age all living Characters (Council and Family)
     all_characters = db.query(Character).filter_by(kingdom_id=kingdom.id, is_alive=True).all()
 
     for char in all_characters:
-        char.idade += 1
+        char.age_up()
 
-        if char.idade >= 75:
-            death_chance = (char.idade - 74) * 0.05
-            if random.random() < death_chance:
-                char.is_alive = False
+        # Determine if character died naturally this cycle
+        if char.roll_natural_death():
+            # Check if this character is the active Sovereign (in case they are mapped)
+            if sov and sov.is_alive and sov.name == char.nome:
+                sov.is_alive = False
 
-                # Check if this character is the active Sovereign (in case they are mapped)
-                # (Though foundation currently separates them, this covers heir ascension edge cases)
-                if sov and sov.is_alive and sov.name == char.nome:
-                    sov.is_alive = False
-
-                # Announce Council death
-                if char.cargo_conselho != "Nenhum":
-                    if channel:
-                        await channel.send(f"🕯️ **Luto Oficial:** O {char.cargo_conselho} **{char.nome}** faleceu de causas naturais aos {char.idade} anos. O cargo agora está vago.")
-                    char.cargo_conselho = "Nenhum"
+            # Announce Council death
+            if char.cargo_conselho != "Nenhum":
+                if channel:
+                    await channel.send(f"🕯️ **Luto Oficial:** O {char.cargo_conselho} **{char.nome}** faleceu de causas naturais aos {char.idade} anos. O cargo agora está vago.")
+                char.cargo_conselho = "Nenhum"
 
     db.commit()

@@ -214,6 +214,7 @@ async def resolve_action(kingdom_status: dict, action_text: str, context_history
     """
     Resolves an action, providing both the narrative and the DB update json.
     Injects context history and character/council state.
+    Functions as a flexible 'Storyteller' Engine.
     If ciclo_completo is True, instructs AI to narrate the passing of a week/year.
     """
     history_str = ""
@@ -224,49 +225,52 @@ async def resolve_action(kingdom_status: dict, action_text: str, context_history
 
     char_str = ""
     if characters:
-        char_str = "Corte Atual:\n"
+        char_str = "Corte Atual (NPCs vivos e passíveis de traição ou heroísmo):\n"
         for c in characters:
             cargo = c.cargo_conselho if c.cargo_conselho != "Nenhum" else c.relacao_familiar
-            char_str += f"- {c.nome} (ID:{c.id}, {cargo}, Poder: {c.poder}, Lealdade: {c.lealdade}, Perfil: {c.personalidade})\n"
+            char_str += f"- {c.nome} (ID:{c.id}, {cargo}, Poder: {c.poder}/100, Lealdade: {c.lealdade}/100, Perfil: {c.personalidade})\n"
 
     ciclo_str = ""
     if ciclo_completo:
         ciclo_str = "\nIMPORTANTE: Esta ação completa um Ciclo. Faça a narrativa transparecer que semanas se passaram, o tempo avançou e os personagens envelheceram.\n"
 
     prompt = f"""
-    Você é o mestre de um RPG medieval slow-burn estilo Crusader Kings. O Soberano realizou a seguinte ação:
-    Ação: "{action_text}"
+    Você é a Engine de um RPG medieval orgânico estilo Crusader Kings e RimWorld. Você não segue apenas regras engessadas, mas sim cria *narrativas emergentes* dinâmicas.
+    O Soberano realizou a seguinte ação: "{action_text}"
 
-    {history_str}
-    {ciclo_str}
-
-    Status atual do reino:
+    [ ESTADO DO MUNDO ]
     Ouro: {kingdom_status.get('gold')} | Exército: {kingdom_status.get('army')} | Influência: {kingdom_status.get('influence')}
     Estabilidade: {kingdom_status.get('estabilidade')}/100
     Leis Atuais: {kingdom_status.get('leis')}
 
     {char_str}
 
-    Avalie a consequência da ação. Considere intrigas: conselheiros desleais podem sabotar o reino ou assassinar o rei. Leis rígidas baixam a estabilidade.
-    Se a ação envolver gastar recursos inexistentes, ela falha (não deduza os recursos, mas o rei pode passar vergonha diminuindo estabilidade/influência).
+    {history_str}
+    {ciclo_str}
+
+    [ DIRETRIZES DA ENGINE ]
+    - Você tem liberdade total para causar eventos em cadeia. Se a ação do jogador for impopular (ex: impostos ou leis brutais), a Estabilidade DEVE cair e NPCs com baixa Lealdade (<40) PODEM se rebelar, roubar recursos ou até assassinar o Soberano (setando soberano_morto: true).
+    - Se a ação exigir Ouro/Exército que o reino não possui, a ação falha miseravelmente, causando perda de Estabilidade ou Lealdade por incompetência.
+    - Personagens poderosos (Poder > 70) têm grande influência e suas ações importam mais. Altere as estatísticas de Poder e Lealdade na chave 'atualizacao_personagens' ativamente (ex: se o Chanceler é agradado, sua lealdade sobe +15).
+    - Você decide a causa e consequência narrativa de cada traço.
 
     Responda ESTRITAMENTE em formato JSON com três chaves:
-    1. "narrativa": Um texto descrevendo o resultado e as consequências.
-    2. "atualizacao_db": Objeto JSON com as mudanças relativas (ex: +50, -10) nos recursos: "ouro", "exercito", "influencia", "estabilidade". Também inclua "soberano_morto" (boolean, default false).
-    3. "atualizacao_personagens": Array opcional contendo atualizações relativas (ex: +10, -20) para os personagens que reagiram à ação. Chaves do objeto: "id" (int do personagem), "lealdade", "poder", "is_alive" (boolean).
+    1. "narrativa": Um texto detalhado (máx 2 parágrafos) descrevendo o desenrolar das ações, focando na agência dos NPCs e no peso do mundo vivo.
+    2. "atualizacao_db": Objeto com mudanças relativas (+ ou -) em "ouro", "exercito", "influencia", "estabilidade". Inclua "soberano_morto" (boolean).
+    3. "atualizacao_personagens": Array listando quem reagiu. Chaves: "id" (int), "lealdade" (+/-), "poder" (+/-), "is_alive" (boolean, false se a IA decidir matá-lo por complô).
 
-    Exemplo de resposta:
+    Exemplo:
     {{
-      "narrativa": "Você ordenou um novo imposto. O ouro fluiu, mas a estabilidade caiu. O Mestre dos Espiões, achando a lei injusta, perdeu lealdade.",
+      "narrativa": "Sua ordem para marchar sobre os camponeses enfureceu a corte. O Mestre dos Espiões, aproveitando a queda de estabilidade, vazou seus planos para os rebeldes e desertou.",
       "atualizacao_db": {{
-        "ouro": 500,
-        "exercito": 0,
-        "influencia": 0,
-        "estabilidade": -10,
+        "ouro": -100,
+        "exercito": -50,
+        "influencia": -10,
+        "estabilidade": -20,
         "soberano_morto": false
       }},
       "atualizacao_personagens": [
-        {{ "id": 3, "lealdade": -15, "poder": 0, "is_alive": true }}
+        {{ "id": 3, "lealdade": -50, "poder": 10, "is_alive": true }}
       ]
     }}
     """
