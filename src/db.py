@@ -37,6 +37,7 @@ class Kingdom(Base):
 
     player = relationship("Player", back_populates="kingdom")
     sovereigns = relationship("Sovereign", back_populates="kingdom")
+    family = relationship("FamilyMember", back_populates="kingdom")
 
 class Sovereign(Base):
     __tablename__ = 'sovereigns'
@@ -49,6 +50,17 @@ class Sovereign(Base):
     designated_heir_age = Column(Integer, nullable=True)
 
     kingdom = relationship("Kingdom", back_populates="sovereigns")
+
+class FamilyMember(Base):
+    __tablename__ = 'family_members'
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kingdom_id = Column(Integer, ForeignKey('kingdoms.id'))
+    name = Column(String, nullable=False)
+    relation = Column(String, nullable=False) # Esposa, Marido, Filho, Irmão, etc.
+    age = Column(Integer, nullable=False)
+    is_alive = Column(Boolean, default=True)
+
+    kingdom = relationship("Kingdom", back_populates="family")
 
 class ActionQueue(Base):
     __tablename__ = 'action_queue'
