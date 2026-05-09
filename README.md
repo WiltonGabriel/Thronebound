@@ -17,12 +17,14 @@ O grande diferencial do projeto é a utilização de Modelos de Linguagem (LLMs)
 
 ## Stack Tecnológica
 
-A arquitetura foi pensada para rodar de forma eficiente com foco em auto-hospedagem (Self-Hosted) e privacidade, separando as regras de jogo da geração de texto:
+A arquitetura foi pensada para rodar de forma eficiente, flexível e modular, separando as regras de jogo (Engine) da geração de texto:
 
-* **Backend / Lógica:** Python (`discord.py`)
+* **Backend / Lógica:** Python (`discord.py`, FastAPI para o Web Dashboard)
 * **Memória de Longo Prazo (RAG):** ChromaDB
 * **Estado e Regras (Matemática):** SQLite
-* **Motor de IA Local:** Ollama (Nativo no Host)
+* **Motor de IA (Agnóstico):** O jogo suporta arquitetura híbrida configurável via `.env`:
+  * **Ollama (Privacidade/Local):** Executado em container Docker isolado, com suporte a passthrough de hardware (AMD ROCm / Nvidia) e auto-pull de modelos.
+  * **Google Gemini API (Cloud/Velocidade):** Integração nativa para resoluções imediatas e alta capacidade de raciocínio.
 * **Orquestração:** Docker & Docker Compose
 
 ## Estrutura de Arquitetura
