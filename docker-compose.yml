@@ -14,6 +14,7 @@ services:
       - thronebound_db_data:/app/data
     depends_on:
       - chromadb
+      - ollama
     networks:
       - thronebound_network
 
@@ -30,6 +31,18 @@ services:
     networks:
       - thronebound_network
 
+  ollama:
+    image: ollama/ollama:rocm
+    container_name: thronebound_ollama
+    restart: unless-stopped
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - thronebound_network
+
 networks:
   thronebound_network:
     driver: bridge
@@ -37,3 +50,4 @@ networks:
 volumes:
   chroma_data:
   thronebound_db_data:
+  ollama_data:
