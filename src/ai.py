@@ -35,30 +35,45 @@ async def query_ollama(prompt: str, json_format: bool = False) -> str:
             print(f"Failed to connect to Ollama: {e}")
             return "{}" if json_format else ""
 
-async def classify_action(action_text: str) -> str:
+async def classify_action(action_text: str) -> dict:
     """
     Classifies if an action is 'Instantânea' (Local) or 'Demorada' (External).
-    Returns 'Instantânea' or 'Demorada'.
+    Also attempts to extract 'reino_destino' (string) and 'distancia_estimada' (number).
+    Returns a dict with 'classificacao', 'reino_destino', and 'distancia_estimada'.
     """
     prompt = f"""
     Você é o mestre de um RPG de texto. Classifique a seguinte ação do jogador como "Instantânea" ou "Demorada".
     - "Instantânea": Ações locais dentro do próprio castelo/cidade (ex: caminhar, pensar, falar com um servo).
-    - "Demorada": Ações externas e logísticas (ex: mover tropas, enviar mensageiros, construir estruturas grandes).
+    - "Demorada": Ações externas e logísticas (ex: mover tropas, enviar mensageiros, construir estruturas grandes, ir para outro local).
 
-    Responda em formato JSON com uma única chave "classificacao" cujo valor seja estritamente "Instantânea" ou "Demorada".
+    Se for "Demorada", tente extrair o nome do reino destino na chave "reino_destino". Se não for mencionado um reino, deixe nulo (null).
+    Também forneça uma "distancia_estimada" arbitrária (um número de 100 a 1000) com base no quão longe a ação parece ir. Se for Instantânea, coloque null para ambos.
+
+    Responda em formato JSON estrito com as chaves "classificacao" (valor estrito "Instantânea" ou "Demorada"), "reino_destino" (string ou null) e "distancia_estimada" (número ou null).
 
     Ação do jogador: "{action_text}"
     """
 
     result = await query_ollama(prompt, json_format=True)
+    default_resp = {"classificacao": "Demorada", "reino_destino": None, "distancia_estimada": 100}
     try:
         data = json.loads(result)
         classification = data.get("classificacao", "Demorada")
         if classification not in ["Instantânea", "Demorada"]:
-            return "Demorada"
-        return classification
+            classification = "Demorada"
+
+        reino_destino = data.get("reino_destino")
+        dist_estimada = data.get("distancia_estimada")
+        if not isinstance(dist_estimada, (int, float)):
+            dist_estimada = 100
+
+        return {
+            "classificacao": classification,
+            "reino_destino": reino_destino,
+            "distancia_estimada": dist_estimada
+        }
     except json.JSONDecodeError:
-        return "Demorada" # Default to delayed on error
+        return default_resp # Default to delayed on error
 
 async def generate_immediate_feedback(action_text: str) -> str:
     """
@@ -72,10 +87,11 @@ async def generate_immediate_feedback(action_text: str) -> str:
     """
     return await query_ollama(prompt, json_format=False)
 
-async def resolve_action(kingdom_status: dict, action_text: str, context_history: list = None) -> dict:
+async def resolve_action(kingdom_status: dict, action_text: str, context_history: list = None, ciclo_completo: bool = False) -> dict:
     """
     Resolves an action, providing both the narrative and the DB update json.
     Injects context history if available.
+    If ciclo_completo is True, instructs AI to narrate the passing of a week/year.
     """
     history_str = ""
     if context_history:
@@ -83,11 +99,16 @@ async def resolve_action(kingdom_status: dict, action_text: str, context_history
         for doc in context_history:
             history_str += f"- {doc}\n"
 
+    ciclo_str = ""
+    if ciclo_completo:
+        ciclo_str = "\nIMPORTANTE: Esta ação completa um Ciclo. Faça a narrativa transparecer que semanas se passaram, o tempo avançou e os personagens envelheceram.\n"
+
     prompt = f"""
-    Você é o mestre de um RPG medieval. O Soberano do reino realizou a seguinte ação:
+    Você é o mestre de um RPG medieval slow-burn. O Soberano do reino realizou a seguinte ação:
     Ação: "{action_text}"
 
     {history_str}
+    {ciclo_str}
 
     Status atual do reino:
     - Ouro: {kingdom_status.get('gold')}
@@ -95,7 +116,7 @@ async def resolve_action(kingdom_status: dict, action_text: str, context_history
     - Influência: {kingdom_status.get('influence')}
 
     Avalie a consequência da ação. Se a ação envolver gastar recursos que o reino não possui, a ação falha e a narrativa deve refletir isso (sem gastar recursos).
-    Se o Soberano tiver mais de 60 anos, e for uma ação arriscada, ele pode morrer.
+    O Soberano também pode acabar morrendo dependendo de suas escolhas.
 
     Responda ESTRITAMENTE em formato JSON com duas chaves:
     1. "narrativa": Um texto descrevendo o resultado e as consequências da ação.
@@ -103,7 +124,7 @@ async def resolve_action(kingdom_status: dict, action_text: str, context_history
 
     Exemplo de resposta:
     {{
-      "narrativa": "Seus emissários chegaram ao reino vizinho e a oferta foi aceita. O ouro foi entregue e a influência cresceu.",
+      "narrativa": "Seus emissários chegaram ao reino vizinho e a oferta foi aceita. O ouro foi entregue e a influência cresceu. Os dias viram semanas, e o peso da idade se torna cada vez mais evidente no seu rosto...",
       "atualizacao_db": {{
         "ouro": -500,
         "exercito": 0,
